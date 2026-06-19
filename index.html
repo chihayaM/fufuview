@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>fufuView Pro</title>
+    <link rel="stylesheet" href="styles.css?v=2">
+    <link rel="preconnect" href="/api/image">
+</head>
+
+<body>
+    <div class="login-overlay" id="loginOverlay" style="display:none;">
+        <div class="login-card">
+            <div class="login-icon">🔒</div>
+            <div class="login-title">fufuView Pro</div>
+            <div class="login-subtitle">请输入密码</div>
+            <input type="password" class="login-input" id="loginPw" placeholder="密码"
+                onkeydown="if(event.key==='Enter')doLogin()">
+            <button class="login-btn" data-action="doLogin">进入</button>
+            <div class="login-error" id="loginError"></div>
+        </div>
+    </div>
+
+    <div class="nav-sidebar" id="sidebar">
+        <div class="nav-header">fufuView Pro</div>
+        <div class="sidebar-stats" id="sidebarStats"></div>
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">快捷操作</div>
+            <div class="nav-item" data-action="randomComic">🎲 随机漫画</div>
+            <div class="nav-item" data-action="openJmPanel">⬇️ JM 下载</div>
+            <div class="nav-item" data-action="openDlStatus">📥 下载状态</div>
+            <div class="nav-item" data-action="openTagManager">🏷️ 标签管理</div>
+            <div class="nav-item" onclick="location.reload()">🔄 刷新书架</div>
+            <div class="nav-item nav-item-danger nav-item-disabled" id="btnResetProgress" data-action="resetAllProgress">📖 重置阅读进度</div>
+            <div class="nav-item nav-item-danger nav-item-disabled" id="btnCleanDel" data-action="openRecycleBin">♻️ 回收站 <span class="del-count" id="delCount"></span></div>
+        </div>
+        <div class="sidebar-section" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+            <div class="sidebar-section-title">书库筛选</div>
+            <div class="nav-list" id="navLinks"></div>
+        </div>
+        <div class="sidebar-back-top" data-action="scrollToTop">⬆️ 返回顶部</div>
+    </div>
+    <div class="sidebar-backdrop" id="sidebarBackdrop" data-action="closeSidebar"></div>
+
+    <div class="main-container">
+        <div class="top-bar">
+            <button class="menu-btn" data-action="toggleSidebar">☰</button>
+            <div class="top-pager" id="topPager"></div>
+            <div class="top-bar-right">
+                <button class="btn btn-download" data-action="openJmPanel">⬇️ 下载</button>
+                <button class="btn btn-random" data-action="randomComic">🎲</button>
+                <button class="btn" onclick="location.reload()">🔄</button>
+            </div>
+        </div>
+
+        <!-- 筛选栏 -->
+        <div class="filter-bar" id="manageBar">
+            <div class="filter-row">
+                <div class="homepage-tags-bar" id="homepageTagsBar"></div>
+                <div class="filter-search-wrap filter-search-compact">
+                    <input type="text" class="filter-search" id="filterSearch"
+                        placeholder="🔍 搜索..."
+                        oninput="onFilterSearch()">
+                </div>
+                <button class="filter-btn tag-picker-btn" data-action="openTagPicker" id="tagPickerBtn">🏷️ 标签</button>
+                <button class="btn-icon" data-action="cycleSort" title="切换排序" id="sortBtn">📅 最新</button>
+            </div>
+            <div class="active-tags-bar" id="activeTagsBar"></div>
+        </div>
+
+        <!-- 标签选择器弹窗 -->
+        <div class="tagpicker-overlay hidden" id="tagPickerOverlay">
+            <div class="tagpicker-modal" id="tagPickerModal">
+                <div class="tagpicker-header">
+                    <span>🏷️ 选择标签筛选</span>
+                    <button class="modal-close" data-action="closeTagPicker">✕</button>
+                </div>
+                <div class="tagpicker-search-row">
+                    <input type="text" class="tagpicker-search" id="tagPickerSearch" placeholder="搜索标签..." oninput="renderTagPicker()">
+                </div>
+                <div class="tagpicker-cats" id="tagPickerCats"></div>
+                <div class="tagpicker-body" id="tagPickerBody"></div>
+                <div class="tagpicker-footer">
+                    <button class="tagpicker-footer-btn" data-action="tagPickerClear">清除选择</button>
+                    <button class="tagpicker-footer-btn primary" data-action="closeTagPicker">确定</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="bookshelf" id="bookshelf">
+            <div class="comic-grid" id="grid-all"></div>
+            <div class="load-more-sentinel" id="loadMoreSentinel"></div>
+        </div>
+
+        <!-- 阅读器 -->
+        <div class="reader-overlay hidden" id="reader">
+            <div class="reader-ui reader-header">
+                <button class="dark-btn" data-action="closeReader" style="background:#e74c3c">✕ 退出</button>
+                <span id="pageProgress">0 / 0</span>
+                <span id="readerTitle" class="reader-title-text"></span>
+                <div style="display:flex; gap:10px;">
+                    <button class="dark-btn" data-action="toggleDir" id="dirBtn">LTR</button>
+                    <button class="dark-btn" data-action="toggleMode" id="modeBtn">双页</button>
+                </div>
+            </div>
+            <div class="reader-content" id="readerContent">
+                <div id="viewContainer" class="view-container">
+                    <div class="page-box" id="box-0"></div>
+                    <div class="page-box" id="box-1"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- JM 下载器弹窗 -->
+        <div class="jm-overlay hidden" id="jmOverlay">
+            <div class="jm-panel" id="jmPanel">
+                <div class="jm-header">
+                    <span>⬇️ JM 漫画下载</span>
+                    <div class="jm-header-btns">
+                        <button class="modal-minimize" id="jmMinBtn" data-action="toggleMinimizeJm">—</button>
+                        <button class="modal-close" data-action="closeJmPanel">✕</button>
+                    </div>
+                </div>
+                <div class="jm-body" id="jmBody">
+                    <div class="jm-input-row">
+                        <textarea class="jm-textarea" id="jmInput" placeholder="输入 JM 号，支持多个（逗号/空格/换行分隔）&#10;如: 12345, 67890 或每行一个"
+                            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doJmSearch()}" oninput="onJmInput()"></textarea>
+                        <button class="jm-search-btn" data-action="doJmSearch">搜索</button>
+                    </div>
+                    <div class="jm-result" id="jmResult"></div>
+                    <div class="jm-queue" id="jmQueue"></div>
+                    <div class="jm-history" id="jmHistory"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 下载状态面板 -->
+        <div class="dl-overlay hidden" id="dlOverlay">
+            <div class="dl-panel" id="dlPanel">
+                <div class="dl-panel-header">
+                    <span>📥 下载状态</span>
+                    <button class="modal-close" data-action="closeDlStatus">✕</button>
+                </div>
+                <div class="dl-panel-body" id="dlPanelBody">
+                    <div class="dl-panel-empty">暂无下载记录</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 随机漫画弹窗 -->
+        <div class="random-overlay hidden" id="randomOverlay">
+            <div class="random-card" id="randomCard">
+                <div class="random-header">
+                    <span class="random-header-title">随机阅读</span>
+                    <button class="modal-close" data-action="closeRandom">✕</button>
+                </div>
+                <div class="random-cover-wrap" data-action="openRandomComic">
+                    <img class="random-cover" id="randomCover" src="" alt="">
+                    <div class="random-play-hint">📖 点击阅读</div>
+                </div>
+                <div class="random-title" id="randomTitle"></div>
+                <div class="random-meta" id="randomMeta"></div>
+                <button class="random-reroll" data-action="rerollRandom">🎲 再来一本</button>
+            </div>
+        </div>
+
+        <!-- 回收站弹窗 -->
+        <div class="recycle-overlay hidden" id="recycleOverlay">
+            <div class="recycle-panel" id="recyclePanel">
+                <div class="recycle-header">
+                    <span>♻️ 回收站</span>
+                    <div class="recycle-header-btns">
+                        <button class="recycle-clean-all" data-action="cleanAllRecycle">🗑️ 清理全部</button>
+                        <button class="modal-close" data-action="closeRecycleBin">✕</button>
+                    </div>
+                </div>
+                <div class="recycle-body" id="recycleBody"></div>
+            </div>
+        </div>
+
+        <!-- 标签管理弹窗 -->
+        <div class="tag-overlay hidden" id="tagOverlay">
+            <div class="tag-modal" id="tagModal">
+                <div class="tag-modal-header">
+                    <span>🏷️ 管理标签</span>
+                    <button class="modal-close" data-action="closeTagModal">✕</button>
+                </div>
+                <div class="tag-modal-body">
+                    <div class="tag-modal-comic" id="tagModalComic"></div>
+                    <div class="tag-input-row">
+                        <input type="text" class="tag-input" id="tagInput" placeholder="输入标签名..."
+                            onkeydown="if(event.key==='Enter')addTag()">
+                        <button class="tag-add-btn" data-action="addTag">添加</button>
+                    </div>
+                    <div class="tag-list" id="tagList"></div>
+                    <div class="tag-suggestions" id="tagSuggestions"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 标签管理器弹窗 -->
+        <div class="tagmgr-overlay hidden" id="tagMgrOverlay">
+            <div class="tagmgr-modal" id="tagMgrModal">
+                <div class="tagmgr-header">
+                    <span>🏷️ 标签管理</span>
+                    <button class="modal-close" data-action="closeTagManager">✕</button>
+                </div>
+                <div class="tagmgr-toolbar">
+                    <input type="text" class="tagmgr-search" id="tagMgrSearch" placeholder="搜索标签..." oninput="renderTagManager()">
+                    <div class="tagmgr-batch">
+                        <button class="tagmgr-batch-btn" data-action="tagMgrShowAll" title="全部显示">👁️</button>
+                        <button class="tagmgr-batch-btn" data-action="tagMgrHideAll" title="全部隐藏">🙈</button>
+                        <button class="tagmgr-batch-btn" data-action="tagMgrInvert" title="反选">🔄</button>
+                    </div>
+                </div>
+                <div class="tagmgr-content">
+                    <div class="tagmgr-sidebar" id="tagMgrSidebar"></div>
+                    <div class="tagmgr-main" id="tagMgrMain"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右键菜单 -->
+        <div class="context-menu hidden" id="contextMenu">
+            <div class="ctx-item" data-action="ctxToggleFav">⭐ 切换收藏</div>
+            <div class="ctx-item" data-action="ctxOpenTagModal">🏷️ 管理标签</div>
+            <div class="ctx-item" data-action="ctxToggleDel" id="ctxDelItem">🗑️ 标记待删除</div>
+            <div class="ctx-separator"></div>
+            <div class="ctx-item ctx-info" id="ctxInfo"></div>
+        </div>
+
+        <!-- 回收站右键菜单 -->
+        <div class="context-menu hidden" id="recycleMenu">
+            <div class="ctx-item" data-action="recycleRestore">↩️ 恢复</div>
+            <div class="ctx-item ctx-item-danger" data-action="recycleDelete">🗑️ 彻底删除</div>
+            <div class="ctx-separator"></div>
+            <div class="ctx-item ctx-info" id="recycleInfo"></div>
+        </div>
+    </div>
+
+    <script src="script.js?v=2"></script>
+</body>
+
+</html>

@@ -1,0 +1,22 @@
+# jmcomic 下载配置
+# 文档: https://github.com/hect0x7/JMComic-Crawler-Python
+
+# 下载目录
+dir_rule:
+  base_dir: D:/JM
+  # 默认规则: 根目录 / 章节标题 / 图片文件
+  # rule: Bd / Ptitle
+
+# 客户端: api=APP端(不限ip), html=网页端(限地区但快)
+client:
+  impl: api
+  retry_times: 5
+
+# 下载配置
+download:
+  cache: true
+  image:
+    decode: true
+  threading:
+    image: 4
+    photo: 2
