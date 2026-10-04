@@ -1,8 +1,9 @@
 # ---------- 个人配置（不要提交）----------
-# config.json / option.yml 是仓库自带的默认值，可以提交；
-# 个人设置写在下面这两个 .local 文件里，它们永远不进仓库。
+# config.json 是仓库自带的默认值；个人设置写 config.local.json，它永远不会进仓库。
+# option.yml 固定用这个名字（jmcomic 约定），但里面会写 JM 账号，所以也不提交；
+# 缺失时 server.py 会自动生成一份不含账号的模板。
 config.local.json
-option.local.yml
+option.yml
 
 # ---------- 运行时数据 ----------
 comics_meta.json

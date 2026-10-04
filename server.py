@@ -63,6 +63,55 @@ else:
 # 访问密码，留空则不启用登录
 PASSWORD = _CONFIG.get('password', '')
 
+# ========== JM 下载配置 ==========
+# 固定用 option.yml 这个名字 —— jmcomic 约定的就是它，独立调用 jmcomic 时读的也是它。
+# 里面会写 JM 账号，所以不纳入版本管理；缺失时按下面模板自动生成。
+OPTION_FILE = os.path.join(BASE_DIR, 'option.yml')
+
+DEFAULT_OPTION_YML = """# jmcomic 下载配置（程序自动生成，不会被提交到仓库）
+# 文档: https://github.com/hect0x7/JMComic-Crawler-Python
+
+# 下载目录
+dir_rule:
+  base_dir: ./library
+
+# 客户端: api=APP端(不限ip), html=网页端(限地区但快)
+client:
+  impl: api
+  retry_times: 5
+
+# 下载配置
+download:
+  cache: true
+  image:
+    decode: true
+  threading:
+    image: 4
+    photo: 2
+
+# 插件：登录
+# 部分内容需要登录才能下载，填入你的 JM 账号后取消注释：
+#
+# plugins:
+#   after_init:
+#     - plugin: login
+#       kwargs:
+#         username: "你的用户名"
+#         password: "你的密码"
+"""
+
+def ensure_option_file():
+    if os.path.exists(OPTION_FILE):
+        return True
+    try:
+        with open(OPTION_FILE, 'w', encoding='utf-8') as f:
+            f.write(DEFAULT_OPTION_YML)
+        print("已生成默认的 option.yml（未配置账号，部分内容可能无法下载）")
+        return True
+    except OSError as e:
+        print(f"⚠️ 无法生成 option.yml: {e}")
+        return False
+
 # ========== Flask 应用 ==========
 app = Flask(__name__,
             static_folder=os.path.join(BASE_DIR, 'static'),
@@ -274,18 +323,14 @@ def get_jmcomic():
         import jmcomic
         from jmcomic import JmOption, disable_jm_log
         disable_jm_log()
-        # option.local.yml（个人配置，不提交）优先于 option.yml（仓库自带默认值）
-        option_file = os.path.join(BASE_DIR, 'option.local.yml')
-        if not os.path.exists(option_file):
-            option_file = os.path.join(BASE_DIR, 'option.yml')
-        if not os.path.exists(option_file):
-            print("⚠️ 未找到 option.yml，JM 下载使用默认配置")
+        # 固定用 option.yml（jmcomic 约定），缺失时自动生成一份模板
+        if not ensure_option_file():
             _jm_option = JmOption.default()
         else:
             try:
-                _jm_option = jmcomic.create_option_by_file(option_file)
+                _jm_option = jmcomic.create_option_by_file(OPTION_FILE)
             except Exception as e:
-                print(f"⚠️ {os.path.basename(option_file)} 加载失败: {e}，使用默认配置")
+                print(f"⚠️ option.yml 加载失败: {e}，使用默认配置")
                 _jm_option = JmOption.default()
         _jm_client = _jm_option.build_jm_client()
         return _jm_client, _jm_option

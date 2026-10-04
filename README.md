@@ -50,14 +50,15 @@ python server.py     # Windows 也可以双击 start.bat
 
 | 文件 | 是否提交 | 放什么 |
 | --- | --- | --- |
-| `config.json` | ✅ 仓库自带 | 默认值。**不要在这里写密码** |
+| `config.json` | ✅ 仓库自带 | 默认值，带字段说明。**不要在这里写密码** |
 | `config.local.json` | ❌ 已 gitignore | 你的个人设置，密码写这里 |
-| `option.yml` | ✅ 仓库自带 | JM 下载的默认值，没有账号信息 |
-| `option.local.yml` | ❌ 已 gitignore | 你的 JM 账号等个人设置 |
+| `option.yml` | ❌ 已 gitignore | JM 下载配置，含 JM 账号。缺失时自动生成模板 |
 
-这么分是因为 `config.json` 是**仓库跟踪**的文件 —— 一旦你在里面填了密码，`git add .` 就会把它提交上去。所以个人设置一律写 `.local` 那一份。
+`config.json` 拆成两份，是因为它**被仓库跟踪** —— 一旦你在里面填了密码，`git add .` 就会把它提交上去。所以个人设置写 `config.local.json`，程序启动时后者覆盖前者。
 
 > 程序启动时如果发现 `config.json` 里填了密码，会在控制台警告你。
+
+`option.yml` 不拆，因为 **jmcomic 认的就是这个文件名** —— 你单独跑 jmcomic 或别的工具，读的也是它。所以个人设置直接写在里面，靠 gitignore 保证它不进仓库。
 
 ### config.json / config.local.json 字段
 
@@ -74,10 +75,11 @@ python server.py     # Windows 也可以双击 start.bat
 | --- | --- |
 | `comics_meta.json` | 标签、收藏、阅读进度。首次打标签时自动创建，不用手动建 |
 | `library/` | 默认书库目录 |
+| `option.yml` | JM 下载配置。首次启动自动生成，填账号就在这个文件里 |
 
 ### JM 下载的账号
 
-`option.yml` 里只有下载目录等默认值，**登录插件是注释掉的**。要用下载功能，在 `option.local.yml` 里写：
+`option.yml` 不会随仓库下载 —— 首次启动时程序会自动在程序目录生成一份，登录部分是注释掉的。要用下载功能，把你自己的账号填进去：
 
 ```yaml
 dir_rule:
@@ -91,7 +93,7 @@ plugins:
         password: "你的密码"
 ```
 
-`option.local.yml` 只要存在，`option.yml` 就会被整体忽略，所以这份要写全。
+改完重启程序生效。这个文件已被 gitignore，所以放着不动就行，不会跟着仓库跑。
 
 ## 常见问题
 
@@ -112,7 +114,7 @@ plugins:
 
 **下载功能报错 / 用不了**
 
-多半是没装 `jmcomic`（`pip install jmcomic`）或没配 `option.local.yml` 的账号。本地阅读不受影响。
+多半是没装 `jmcomic`（`pip install jmcomic`）或没在 `option.yml` 里配账号。本地阅读不受影响。
 
 ## 目录结构
 
@@ -123,7 +125,7 @@ plugins:
 ├── start.bat                 # Windows 启动脚本
 ├── requirements.txt
 ├── config.json               # 默认配置（可提交）
-├── option.yml                # JM 下载默认配置（可提交）
+├── option.yml                # JM 下载配置（首次启动自动生成，不提交）
 ├── templates/
 │   └── index.html            # 单页应用模板
 └── static/
