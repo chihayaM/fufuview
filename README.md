@@ -146,8 +146,18 @@ download:
 
 要改的主要是两处：
 
-**1. 下载到哪** —— `dir_rule.base_dir`。建议保持默认的 `./library`，这样下载完直接出现在书架里；
-指向别的目录也行，只要那个目录在 `config.json` 的 `libraryPaths` 里，或者就是 `library/` 本身。
+**1. 下载到哪** —— `dir_rule.base_dir`。注意**书库可以有多个，下载目录只有一个**，这里和
+`libraryPaths` 写了几个没关系。默认的 `./library` 就是默认书库，下载完直接出现在书架里。
+
+想让下载落进自己已有的书库，改成那个目录：
+
+```yaml
+dir_rule:
+  base_dir: D:/Comics
+```
+
+不管指向哪，这个目录都要能被书架扫到（在 `config.json` 的 `libraryPaths` 里，或者就是默认的
+`library/` 本身），否则下载完书架里看不到。
 
 **2. JM 账号** —— 把末尾的注释去掉，填上自己的账号：
 
