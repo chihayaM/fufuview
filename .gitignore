@@ -1,10 +1,14 @@
 # ---------- 个人配置（不要提交）----------
-config.json
-option.yml
+# config.json / option.yml 是仓库自带的默认值，可以提交；
+# 个人设置写在下面这两个 .local 文件里，它们永远不进仓库。
+config.local.json
+option.local.yml
 
 # ---------- 运行时数据 ----------
 comics_meta.json
 *.tmp.*
+# 默认漫画目录（把漫画放这里就行，别提交进仓库）
+library/
 
 # ---------- Python ----------
 __pycache__/

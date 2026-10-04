@@ -312,13 +312,18 @@ async function initApp() {
     renderNavLinks();
     $('sortBtn').innerHTML = SORT_LABELS[state.sortMode];
 
-    // 并行加载所有库
+    // 并行加载所有库；单个库出错不影响其他库，把失败的记下来提示用户
     const results = await Promise.all(
-        state.paths.map((p, i) => api('comics', { path: p }).then(res => ({ i, comics: res.comics || [] })))
+        state.paths.map((p, i) => api('comics', { path: p })
+            .then(res => ({ i, comics: res.comics || [] }))
+            .catch(e => ({ i, comics: [], failedPath: p, reason: e.message })))
     );
+    const failedPaths = results.filter(r => r.failedPath)
+        .map(r => ({ path: r.failedPath, reason: r.reason }));
     results.forEach(r => { state.comics[r.i] = r.comics; });
 
     applyFilters();
+    renderShelfEmpty(failedPaths);
     await loadStats();
     updateProgressButton();
     // 主题切换已由 app.js 的 toggleTheme 处理
@@ -1228,6 +1233,38 @@ function getAllFiltered() {
     return all;
 }
 
+function hideShelfEmpty() {
+    const el = $('shelfEmpty');
+    if (el) el.classList.add('hidden');
+}
+
+/**
+ * 书架上一本书都没有时给出可操作的提示，而不是留一片空白。
+ * failedPaths: 加载失败的书库 [{path, reason}]
+ */
+function renderShelfEmpty(failedPaths) {
+    const el = $('shelfEmpty');
+    if (!el) return;
+    const total = Object.values(state.comics).reduce((n, list) => n + (list ? list.length : 0), 0);
+    if (total > 0) { hideShelfEmpty(); return; }
+
+    let html;
+    if (!state.paths.length) {
+        html = `<div class="shelf-empty-title">还没有配置漫画目录</div>
+            <div>编辑 <code>config.local.json</code>，把漫画根目录填进 <code>libraryPaths</code>，然后重启程序。</div>`;
+    } else if (failedPaths && failedPaths.length) {
+        html = `<div class="shelf-empty-title">书库目录读不到</div>
+            <div>下面这些目录不存在或没有权限，检查路径，或编辑 <code>config.local.json</code> 后重启：</div>
+            <ul class="shelf-empty-list">${failedPaths.map(f => `<li>${esc(f.path)} —— ${esc(f.reason)}</li>`).join('')}</ul>`;
+    } else {
+        html = `<div class="shelf-empty-title">书库还是空的</div>
+            <div>把漫画文件夹放进 <code>${esc(state.paths[0])}</code>，每个子文件夹会被当成一本漫画。</div>
+            <div class="shelf-empty-hint">想换个目录？编辑 <code>config.local.json</code> 的 <code>libraryPaths</code> 后重启程序。</div>`;
+    }
+    el.innerHTML = html;
+    el.classList.remove('hidden');
+}
+
 function applyFilters(scrollToStart) {
     state.allFiltered = [];
     state.displayedCount = 0;
@@ -1236,6 +1273,7 @@ function applyFilters(scrollToStart) {
     grid.innerHTML = '';
     loadMoreItems();
     refreshPager();
+    if (state.allFiltered.length) hideShelfEmpty();
     if (scrollToStart !== false) scrollToTop();
 }
 

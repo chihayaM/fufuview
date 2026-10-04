@@ -1,11 +1,12 @@
-# jmcomic 下载配置示例
+# jmcomic 下载配置（仓库自带默认值）
 # 文档: https://github.com/hect0x7/JMComic-Crawler-Python
 #
-# 用法：复制本文件为 option.yml 后按需修改。option.yml 不会被提交到仓库。
+# 个人设置请写到 option.local.yml（该文件不会被提交），例如 JM 账号密码。
+# option.local.yml 存在时，本文件会被整体忽略。
 
 # 下载目录
 dir_rule:
-  base_dir: D:/Comics
+  base_dir: ./library
   # 默认规则: 根目录 / 章节标题 / 图片文件
   # rule: Bd / Ptitle
 
@@ -23,10 +24,12 @@ download:
     image: 4
     photo: 2
 
-# 插件：登录（需要下载功能时填写你自己的 JM 账号）
-# plugins:
-#   after_init:
-#     - plugin: login
-#       kwargs:
-#         username: "你的用户名"
-#         password: "你的密码"
+# 插件：登录
+# 需要下载功能时，把你的 JM 账号写到 option.local.yml：
+#
+#   plugins:
+#     after_init:
+#       - plugin: login
+#         kwargs:
+#           username: "你的用户名"
+#           password: "你的密码"

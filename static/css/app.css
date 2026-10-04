@@ -787,6 +787,15 @@ input, textarea, select { font-family: inherit; }
 .tagpicker-cat-btn.active { background: var(--brand); color: white; border-color: var(--brand); }
 .tagpicker-body { padding: 10px 20px; overflow-y: auto; flex: 1; }
 .tagpicker-empty { text-align: center; color: var(--text-muted); font-size: 13px; padding: 40px 0; }
+
+/* ---------- 书架空状态（首次运行 / 书库不存在） ---------- */
+.shelf-empty { padding: 72px 24px; text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1.9; }
+.shelf-empty-icon { font-size: 38px; line-height: 1; margin-bottom: 16px; opacity: .5; }
+.shelf-empty-title { font-size: 17px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.shelf-empty code { font-family: 'Consolas', monospace; font-size: 13px; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 2px 7px; color: var(--text-secondary); }
+.shelf-empty-list { margin: 12px auto 0; max-width: 560px; text-align: left; font-size: 13px; color: var(--text-muted); }
+.shelf-empty-list li { margin: 4px 0; word-break: break-all; }
+.shelf-empty-hint { margin-top: 18px; font-size: 13px; color: var(--text-muted); }
 .tagpicker-section { margin-bottom: 14px; }
 .tagpicker-section-title { font-size: 11px; font-weight: 700; color: var(--text-secondary); padding: 6px 0 4px; position: sticky; top: 0; background: var(--bg-elevated); z-index: 2; }
 .tagpicker-grid { display: flex; flex-wrap: wrap; gap: 5px; }

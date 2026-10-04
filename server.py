@@ -17,27 +17,49 @@ from flask import Flask, request, jsonify, send_file, render_template, Response,
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # ========== 本地配置 ==========
-# 复制 config.example.json 为 config.json 后按需修改（config.json 不会提交）
+# config.json       仓库自带的默认配置，别在里面写密码
+# config.local.json 个人配置，覆盖 config.json，已被 .gitignore 忽略
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
+LOCAL_CONFIG_FILE = os.path.join(BASE_DIR, 'config.local.json')
 
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        return {}
+def _read_config_file(path):
     try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"⚠️ config.json 解析失败，使用默认配置: {e}")
+        print(f"⚠️ {os.path.basename(path)} 解析失败，已跳过: {e}")
         return {}
+
+def load_config():
+    base = _read_config_file(CONFIG_FILE) if os.path.exists(CONFIG_FILE) else {}
+    local = _read_config_file(LOCAL_CONFIG_FILE) if os.path.exists(LOCAL_CONFIG_FILE) else {}
+    if base.get('password'):
+        print("⚠️ config.json 里填了密码。它是仓库跟踪的文件，容易被误提交，")
+        print("   建议把密码移到 config.local.json（该文件不会被提交）。")
+    return {**base, **local}
 
 _CONFIG = load_config()
 
 PORT = int(_CONFIG.get('port', 8004))
-META_FILE = os.path.join(BASE_DIR, 'comics_meta.json')
+META_FILE = _CONFIG.get('metaFile') or os.path.join(BASE_DIR, 'comics_meta.json')
 
 # ========== 运行配置 ==========
-# 漫画书库根目录列表，可被 config.json 的 libraryPaths 覆盖
-LIBRARY_PATHS = _CONFIG.get('libraryPaths') or ["D:\\JM"]
+# 漫画书库根目录列表，在 config.json / config.local.json 的 libraryPaths 里配置
+LIBRARY_PATHS = [os.path.abspath(os.path.expanduser(p))
+                 for p in (_CONFIG.get('libraryPaths') or []) if p]
+
+# 一个书库都没配时，退回到程序同目录下的 library/，首次运行自动创建
+if not LIBRARY_PATHS:
+    DEFAULT_LIBRARY = os.path.join(BASE_DIR, 'library')
+    try:
+        os.makedirs(DEFAULT_LIBRARY, exist_ok=True)
+    except OSError as e:
+        print(f"⚠️ 无法创建默认书库目录: {e}")
+    LIBRARY_PATHS = [DEFAULT_LIBRARY]
+    USING_DEFAULT_LIBRARY = True
+else:
+    USING_DEFAULT_LIBRARY = False
+
 # 访问密码，留空则不启用登录
 PASSWORD = _CONFIG.get('password', '')
 
@@ -252,15 +274,18 @@ def get_jmcomic():
         import jmcomic
         from jmcomic import JmOption, disable_jm_log
         disable_jm_log()
-        option_file = os.path.join(BASE_DIR, 'option.yml')
+        # option.local.yml（个人配置，不提交）优先于 option.yml（仓库自带默认值）
+        option_file = os.path.join(BASE_DIR, 'option.local.yml')
         if not os.path.exists(option_file):
-            print("⚠️ 未找到 option.yml，使用默认配置（可复制 option.example.yml 后按需修改）")
+            option_file = os.path.join(BASE_DIR, 'option.yml')
+        if not os.path.exists(option_file):
+            print("⚠️ 未找到 option.yml，JM 下载使用默认配置")
             _jm_option = JmOption.default()
         else:
             try:
                 _jm_option = jmcomic.create_option_by_file(option_file)
             except Exception as e:
-                print(f"⚠️ option.yml 加载失败: {e}，使用默认配置")
+                print(f"⚠️ {os.path.basename(option_file)} 加载失败: {e}，使用默认配置")
                 _jm_option = JmOption.default()
         _jm_client = _jm_option.build_jm_client()
         return _jm_client, _jm_option
@@ -1093,6 +1118,13 @@ if __name__ == '__main__':
     # --- Flask 就绪后立即拉起浏览器（jmcomic 后台继续加载） ---
     print(f"✅ fufuView Pro 服务器已启动！")
     print(f"   访问地址: http://{local_ip}:{PORT}")
+    for p in LIBRARY_PATHS:
+        mark = "（默认）" if USING_DEFAULT_LIBRARY else ""
+        exists = "" if os.path.isdir(p) else "  ← 目录不存在"
+        print(f"   书库: {p} {mark}{exists}")
+    if USING_DEFAULT_LIBRARY:
+        print(f"   还没有配置漫画目录，已自动使用 {LIBRARY_PATHS[0]}")
+        print(f"   把漫画文件夹放进去即可；或编辑 config.local.json 添加其他目录")
     _open_app_window(f'http://{local_ip}:{PORT}')
 
     # --- jmcomic 加载结果异步输出 ---
