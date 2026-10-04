@@ -30,8 +30,23 @@ except ImportError:
     HAS_CV2 = False
 
 # ===================== 配置 =====================
-LIBRARY_PATHS = [r'D:\JM', r'D:\eh', r'E:\ehviewer']
-DEFAULT_META   = r'D:\Code_field\comics-app\comics_meta.json'
+# 默认值均可在界面上修改；也可在 config.json 中提供 libraryPaths / metaFile
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_CONFIG_FILE = os.path.join(_BASE_DIR, 'config.json')
+
+def _load_config():
+    if not os.path.exists(_CONFIG_FILE):
+        return {}
+    try:
+        with open(_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_CONFIG = _load_config()
+
+LIBRARY_PATHS = _CONFIG.get('libraryPaths') or [r'D:\JM']
+DEFAULT_META   = _CONFIG.get('metaFile') or os.path.join(_BASE_DIR, 'comics_meta.json')
 FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 

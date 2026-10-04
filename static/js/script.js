@@ -1,6 +1,5 @@
-const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-const relTime = ts => { if (!ts) return ''; const d = Math.floor(Date.now() / 1000 - ts); if (d < 5) return '刚刚'; if (d < 60) return d + '秒前'; if (d < 3600) return Math.floor(d / 60) + '分钟前'; if (d < 86400) return Math.floor(d / 3600) + '小时前'; return ''; };
+// $ / esc / relTime / showToast / showConfirm / icon 均由 app.js 提供
+const $ = $id;
 
 // ==================== CoverManager 封面加载器 ====================
 
@@ -165,7 +164,7 @@ const state = {
     activeTags: new Set(),   // 多选 tag
     activePaths: new Set(),  // 多选书库路径
     allTags: {},
-    hiddenTags: new Set(),   // 在主页标签栏隐藏的 tag
+    homepageTags: new Set(), // 主页显示标签白名单（只有在此集合里的标签才出现在主页）
     tagCategories: {},       // tag 分类 { catName: [tag1, tag2, ...] }
     ctxTarget: null,
     recycleTarget: null,
@@ -173,7 +172,9 @@ const state = {
     activeJmDownloads: new Set(),  // 跟踪活跃的 JM 下载任务（跨面板开关保持）
     longPressFired: false,
     menuJustClosed: false,
+    hoverPreview: localStorage.getItem('hoverPreviewOff') !== '1',  // 鼠标悬浮封面预览开关（记忆用户选择）
     readerOpen: false,
+    appFullscreen: false,
     // 统一分页状态
     allFiltered: [],       // 合并后的全部过滤结果
     displayedCount: 0,     // 当前已渲染的数量
@@ -183,92 +184,34 @@ const state = {
 
 const PER_PAGE = 60;       // 每次加载数量
 
-const SORT_LABELS = ['📅 最新', '📅 最旧', '📖 最近阅读'];
+const SORT_LABELS = [icon('calendar') + ' 最新', icon('calendar') + ' 最旧', icon('clock') + ' 最近'];
 const SORT_MODES = ['mtime-desc', 'mtime-asc', 'lastRead-desc'];
-const FAV_TAG = '⭐ 收藏';
+const FAV_TAG = '收藏';  // virtual tag for data comparison
 
 const api = async (ep, params = {}) => {
     const res = await fetch(`/api/${ep}?` + new URLSearchParams(params).toString());
+    if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const e = await res.json(); if (e.error) msg = e.error; } catch {}
+        throw new Error(msg);
+    }
     return res.json();
 };
 const apiPost = async (ep, body) => {
     const res = await fetch(`/api/${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const e = await res.json(); if (e.error) msg = e.error; } catch {}
+        throw new Error(msg);
+    }
     return res.json();
 };
 
 // ==================== 初始化 ====================
 
 async function init() {
-    // 登录按钮事件委托（在 auth 检查前注册，否则登录页按钮不可用）
-    document.addEventListener('click', e => {
-        const el = e.target.closest('[data-action]');
-        if (!el) return;
-        if (el.dataset.action === 'doLogin') doLogin();
-    });
-    const authed = await checkAuth();
-    if (authed) initApp();
-}
-
-async function initApp() {
-    // 加载标签管理配置
-    await loadTagConfig();
-
-    const data = await api('config');
-    state.paths = data.libraryPaths || [];
-    renderNavLinks();
-
-    // 并行加载所有库
-    const results = await Promise.all(
-        state.paths.map((p, i) => api('comics', { path: p }).then(res => ({ i, comics: res.comics || [] })))
-    );
-    results.forEach(r => { state.comics[r.i] = r.comics; });
-
-    applyFilters();
-    await loadStats();
-    updateProgressButton();
-
-    // 事件委托：书架区域的点击/右键/长按/悬浮
-    setupBookshelfDelegation();
-
-    initCoverSystem();
-    setupInfiniteScroll();
-
-    // 全局点击：关闭侧边栏、右键菜单、弹窗
-    const closeMenus = (e) => {
-        const sidebar = $('sidebar');
-        const menuBtn = document.querySelector('.menu-btn');
-        if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !menuBtn.contains(e.target)) {
-            closeSidebar();
-            e.stopPropagation();
-            e.preventDefault();
-            return;
-        }
-        if (!e.target.closest('.context-menu')) $('contextMenu').classList.add('hidden');
-        if (!e.target.closest('.context-menu')) $('recycleMenu').classList.add('hidden');
-        if (e.target === $('randomOverlay')) closeRandom();
-        if (e.target === $('jmOverlay')) closeJmPanel();
-        if (e.target === $('dlOverlay')) closeDlStatus();
-        if (e.target === $('tagOverlay')) closeTagModal();
-        if (e.target === $('tagMgrOverlay')) closeTagManager();
-        if (e.target === $('tagPickerOverlay')) closeTagPicker();
-        if (e.target === $('recycleOverlay')) closeRecycleBin();
-    };
-    document.addEventListener('click', (e) => {
-        if (state.longPressFired) { state.longPressFired = false; return; }
-        closeMenus(e);
-    }, true);
-
-    // 手机端 touch 兜底：长按呼出菜单后，tap 其他区域即关
-    document.addEventListener('touchstart', (e) => {
-        const ctx = $('contextMenu');
-        if (!ctx.classList.contains('hidden') && !e.target.closest('.context-menu')) {
-            ctx.classList.add('hidden');
-            // 阻止后续 click 冒泡到卡片，避免误触进入阅读
-            e.preventDefault();
-        }
-    }, { passive: false });
-
     // 全局事件委托：替代所有 inline onclick，防止 JS 注入
+    // 在 auth 检查前注册，确保登录页按钮可用
     document.addEventListener('click', e => {
         const el = e.target.closest('[data-action]');
         if (!el) return;
@@ -309,6 +252,8 @@ async function initApp() {
             // 侧边栏 & 导航
             case 'toggleSidebar': toggleSidebar(); break;
             case 'closeSidebar': closeSidebar(); break;
+            case 'toggleCollapse': toggleSidebarCollapse(); break;
+            case 'toggleFullscreen': toggleAppFullscreen(); break;
             case 'scrollToTop': scrollToTop(); break;
             case 'togglePathFilter': togglePathFilter(parseInt(a1)); break;
             case 'clearPathFilter': clearPathFilter(); break;
@@ -322,7 +267,9 @@ async function initApp() {
             case 'jmHistSearch': $('jmInput').value = a1; doJmSearch(); break;
             case 'startJmDownload': startJmDownload(el.dataset.id, el.dataset.name); break;
             case 'toggleDlPreview': toggleDlPreview(); break;
+            case 'toggleHoverPreview': toggleHoverPreview(); break;
             case 'openDlStatus': openDlStatus(); break;
+                        case 'sortByLastRead': sortByLastRead(); break;
             case 'closeDlStatus': closeDlStatus(); break;
             // 阅读器
             case 'closeReader': closeReader(); break;
@@ -341,14 +288,86 @@ async function initApp() {
             case 'cleanAllRecycle': cleanAllRecycle(); break;
             case 'recycleRestore': recycleRestore(); break;
             case 'recycleDelete': recycleDelete(); break;
-            // 右键菜单
-            case 'ctxToggleFav': ctxToggleFav(); break;
-            case 'ctxOpenTagModal': ctxOpenTagModal(); break;
+            // 右键菜单 & 详情面板
+            case 'ctxOpenDetail': ctxOpenDetail(); break;
             case 'ctxToggleDel': ctxToggleDel(); break;
+            case 'detailToggleFav': detailToggleFav(); break;
+            case 'detailToggleDel': detailToggleDel(); break;
+            case 'detailResetProgress': detailResetProgress(); break;
+            case 'detailDeleteComic': detailDeleteComic(); break;
             // 登录
             case 'doLogin': doLogin(); break;
         }
     });
+    const authed = await checkAuth();
+    if (authed) initApp();
+}
+
+async function initApp() {
+    // 加载标签管理配置
+    await loadTagConfig();
+
+    const data = await api('config');
+    state.paths = data.libraryPaths || [];
+    renderNavLinks();
+    $('sortBtn').innerHTML = SORT_LABELS[state.sortMode];
+
+    // 并行加载所有库
+    const results = await Promise.all(
+        state.paths.map((p, i) => api('comics', { path: p }).then(res => ({ i, comics: res.comics || [] })))
+    );
+    results.forEach(r => { state.comics[r.i] = r.comics; });
+
+    applyFilters();
+    await loadStats();
+    updateProgressButton();
+    // 主题切换已由 app.js 的 toggleTheme 处理
+
+    // 事件委托：书架区域的点击/右键/长按/悬浮
+    setupBookshelfDelegation();
+
+    initCoverSystem();
+    setupInfiniteScroll();
+    initSidebarCollapse();
+    updateHoverPreviewBtn();
+    initPageSlider();
+
+    // 全局点击：关闭侧边栏、右键菜单、弹窗
+    const closeMenus = (e) => {
+        const sidebar = $('sidebar');
+        const menuBtn = document.querySelector('.menu-btn');
+        if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !menuBtn.contains(e.target)) {
+            closeSidebar();
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+        }
+        if (!e.target.closest('.context-menu')) {
+            $('contextMenu').classList.add('hidden');
+            $('recycleMenu').classList.add('hidden');
+        }
+        if (e.target === $('randomOverlay')) closeRandom();
+        if (e.target === $('jmOverlay')) closeJmPanel();
+        if (e.target === $('dlOverlay')) closeDlStatus();
+        if (e.target === $('tagOverlay')) closeTagModal();
+        if (e.target === $('tagMgrOverlay')) closeTagManager();
+        if (e.target === $('tagPickerOverlay')) closeTagPicker();
+        if (e.target === $('recycleOverlay')) closeRecycleBin();
+    };
+    document.addEventListener('click', (e) => {
+        if (state.longPressFired) { state.longPressFired = false; return; }
+        closeMenus(e);
+    }, true);
+
+    // 手机端 touch 兜底：长按呼出菜单后，tap 其他区域即关
+    document.addEventListener('touchstart', (e) => {
+        const ctx = $('contextMenu');
+        if (!ctx.classList.contains('hidden') && !e.target.closest('.context-menu')) {
+            ctx.classList.add('hidden');
+            // 阻止后续 click 冒泡到卡片，避免误触进入阅读
+            e.preventDefault();
+        }
+    }, { passive: false });
 
     // select 元素 change 事件委托
     document.addEventListener('change', e => {
@@ -362,10 +381,11 @@ async function initApp() {
     // ESC 关闭弹窗
     document.addEventListener('keydown', e => {
         if (!$('reader').classList.contains('hidden')) {
-            if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); turnPage(state.rtl ? -1 : 1); return; }
-            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); turnPage(state.rtl ? 1 : -1); return; }
-            if (e.key === 'Escape') { closeReader(); return; }
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'd' || e.key === 'D') { e.preventDefault(); turnPage(state.rtl ? -1 : 1); return; }
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'a' || e.key === 'A') { e.preventDefault(); turnPage(state.rtl ? 1 : -1); return; }
+            if (e.key === 'Escape' || e.key === 'q' || e.key === 'Q') { closeReader(); return; }
         }
+        if (e.key === 'e' || e.key === 'E') { toggleAppFullscreen(); return; }
         if (e.key === 'Escape') {
             if (!$('contextMenu').classList.contains('hidden')) { $('contextMenu').classList.add('hidden'); return; }
             if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
@@ -385,6 +405,18 @@ async function initApp() {
 
     // 恢复下载状态
     initDownloadRecovery();
+
+    // 阅读器事件绑定（必须在 DOM 就绪后执行）
+    const rc = $('readerContent');
+    if (rc) {
+        rc.onmousedown = e => { if (!state.isMobile && e.button === 0) handleAction(e.clientX); };
+        rc.ontouchstart = e => { state.touchX = e.touches[0].clientX; };
+        rc.ontouchend = e => {
+            const diff = state.touchX - e.changedTouches[0].clientX;
+            if (Math.abs(diff) > 60) turnPage(diff > 0 ? (state.rtl ? -1 : 1) : (state.rtl ? 1 : -1));
+            else handleAction(e.changedTouches[0].clientX);
+        };
+    }
 }
 
 // ==================== 下载状态恢复 ====================
@@ -430,26 +462,7 @@ function updateDownloadBadge(count) {
     }
 }
 
-function showToast(message, type = 'info') {
-    let container = $('toastContainer');
-    if (!container) {
-        container = document.createElement('div');
-        container.id = 'toastContainer';
-        container.style.cssText = 'position:fixed;top:60px;right:16px;z-index:99999;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
-        document.body.appendChild(container);
-    }
-    const toast = document.createElement('div');
-    const colors = { success: '#2ecc71', error: '#e74c3c', info: '#5b6abf' };
-    const icons = { success: '✅', error: '❌', info: 'ℹ️' };
-    toast.style.cssText = `pointer-events:auto;padding:10px 16px;background:${colors[type] || colors.info};color:white;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,0.2);transform:translateX(120%);transition:transform 0.35s cubic-bezier(0.22,1,0.36,1);max-width:320px;word-break:break-all;`;
-    toast.textContent = `${icons[type] || icons.info} ${message}`;
-    container.appendChild(toast);
-    requestAnimationFrame(() => { toast.style.transform = 'translateX(0)'; });
-    setTimeout(() => {
-        toast.style.transform = 'translateX(120%)';
-        setTimeout(() => toast.remove(), 400);
-    }, 4000);
-}
+// showToast 已由 app.js 提供
 
 function refreshBookshelfIncremental() {
     // 增量刷新：重新加载所有书库数据，保持当前滚动位置和筛选状态
@@ -544,6 +557,7 @@ function setupBookshelfDelegation() {
             cancelHover();  // 进入新卡片前，先取消前一个待触发的预览
             hoverCard = card;
             hoverTimer = setTimeout(() => {
+                if (!state.hoverPreview) return;  // 用户已关闭悬浮预览
                 if (!$('contextMenu').classList.contains('hidden')) return;
                 if (!$('randomOverlay').classList.contains('hidden')) return;
                 if (!$('jmOverlay').classList.contains('hidden')) return;
@@ -571,7 +585,17 @@ function onFilterSearch() {
 
 function cycleSort() {
     state.sortMode = (state.sortMode + 1) % SORT_MODES.length;
-    $('sortBtn').innerText = SORT_LABELS[state.sortMode];
+    $('sortBtn').innerHTML = SORT_LABELS[state.sortMode];
+    invalidateCache();
+    applyFilters();
+}
+function sortByLastRead() {
+    // 切换：已在最近阅读模式则恢复默认，否则进入最近阅读
+    state.sortMode = (state.sortMode === 2) ? 0 : 2;
+    $('sortBtn').innerHTML = SORT_LABELS[state.sortMode];
+    // 按钮高亮状态
+    const btn = document.querySelector('[data-action="sortByLastRead"]');
+    if (btn) btn.classList.toggle('active', state.sortMode === 2);
     invalidateCache();
     applyFilters();
 }
@@ -621,8 +645,7 @@ function updateSidebarStats(stats) {
         btn.classList.add('nav-item-disabled');
     }
     // 禁用/启用重置阅读进度按钮
-    const hasProgress = state.comics.some(list => list && list.some(c => c.lastRead || c.readProgress));
-    $('btnResetProgress').classList.toggle('nav-item-disabled', !hasProgress);
+    updateProgressButton();
 }
 
 function updateProgressButton() {
@@ -635,7 +658,7 @@ function updateProgressButton() {
 async function loadTagConfig() {
     try {
         const cfg = await api('tag-config');
-        state.hiddenTags = new Set(cfg.hiddenTags || []);
+        state.homepageTags = new Set(cfg.homepageTags || []);
         state.tagCategories = cfg.tagCategories || {};
     } catch (e) { /* ignore */ }
 }
@@ -643,7 +666,7 @@ async function loadTagConfig() {
 async function saveTagConfig() {
     try {
         await apiPost('tag-config', {
-            hiddenTags: [...state.hiddenTags],
+            homepageTags: [...state.homepageTags],
             tagCategories: state.tagCategories,
         });
     } catch (e) { console.warn('保存标签配置失败', e); }
@@ -659,28 +682,28 @@ function renderHomepageTags() {
     if (!bar) return;
     // 记住当前展开状态，重建 DOM 后恢复
     const wasExpanded = bar.classList.contains('expanded');
-    // 显示非隐藏的标签（排除 del），按数量降序
+    // 只显示在 homepageTags 白名单中的标签（按数量降序）
     const visibleTags = Object.entries(state.allTags)
-        .filter(([t]) => t !== 'del' && t !== FAV_TAG && !state.hiddenTags.has(t))
+        .filter(([t]) => t !== 'del' && t !== FAV_TAG && state.homepageTags.has(t))
         .sort((a, b) => b[1] - a[1]);
     // 收藏始终显示在最前面
     const favCount = state.allTags[FAV_TAG] || 0;
     const favChip = favCount > 0
-        ? `<button class="homepage-tag-chip ${state.activeTags.has(FAV_TAG) ? 'active' : ''}" data-action="toggleHomepageTag" data-arg1="${esc(FAV_TAG)}">⭐ 收藏<span class="ht-count">${favCount}</span></button>`
+        ? `<button class="homepage-tag-chip ${state.activeTags.has(FAV_TAG) ? 'active' : ''}" data-action="toggleHomepageTag" data-arg1="${esc(FAV_TAG)}">${icon('star')} 收藏<span class="ht-count">${favCount}</span></button>`
         : '';
     // "全部"按钮：无选中 tag 时高亮
     const allActive = state.activeTags.size === 0;
-    const allChip = `<button class="homepage-tag-chip homepage-tag-all ${allActive ? 'active' : ''}" data-action="clearAllHomepageTags">📚 全部</button>`;
+    const allChip = `<button class="homepage-tag-chip homepage-tag-all ${allActive ? 'active' : ''}" data-action="clearAllHomepageTags">${icon('bookOpen')} 全部</button>`;
     const chips = allChip + favChip + visibleTags.map(([t, count]) => {
         const isActive = state.activeTags.has(t);
         return `<button class="homepage-tag-chip ${isActive ? 'active' : ''}" data-action="toggleHomepageTag" data-arg1="${esc(t)}">${esc(t)}<span class="ht-count">${count}</span></button>`;
     }).join('');
-    bar.innerHTML = `<div class="homepage-tags-scroll">${chips}</div><button class="homepage-tags-expand" id="homepageTagsExpand" data-action="toggleHomepageTagsExpand">⋯</button>`;
+    bar.innerHTML = `<div class="homepage-tags-scroll">${chips}</div><button class="homepage-tags-expand" id="homepageTagsExpand" data-action="toggleHomepageTagsExpand">${icon('moreH')}</button>`;
     // 恢复展开状态
     if (wasExpanded) {
         bar.classList.add('expanded');
         const btn = $('homepageTagsExpand');
-        if (btn) btn.textContent = '✕';
+        if (btn) btn.innerHTML = icon('x');
     }
     updateHomepageTagsExpandBtn();
     requestAnimationFrame(() => updateHomepageTagsExpandBtn());
@@ -715,7 +738,7 @@ function toggleHomepageTagsExpand() {
     const btn = $('homepageTagsExpand');
     if (!bar || !btn) return;
     const expanded = bar.classList.toggle('expanded');
-    btn.textContent = expanded ? '✕' : '⋯';
+    btn.innerHTML = expanded ? icon('x') : icon('moreH');
     // 关闭折叠后，如果不溢出则隐藏按钮
     if (!expanded) {
         requestAnimationFrame(() => updateHomepageTagsExpandBtn());
@@ -723,17 +746,7 @@ function toggleHomepageTagsExpand() {
 }
 
 function toggleHomepageTag(tag) {
-    if (state.activeTags.has(tag)) {
-        state.activeTags.delete(tag);
-    } else {
-        state.activeTags.add(tag);
-    }
-    state.activeTag = state.activeTags.size === 1 ? [...state.activeTags][0] : '';
-    renderHomepageTags();
-    renderActiveTags();
-    updateTagPickerBtn();
-    invalidateCache();
-    applyFilters();
+    toggleTagFilter(tag);
 }
 
 function renderActiveTags() {
@@ -744,7 +757,7 @@ function renderActiveTags() {
         return;
     }
     bar.innerHTML = [...state.activeTags].map(t =>
-        `<button class="active-tag-pill" data-action="toggleTagFilter" data-arg1="${esc(t)}">${esc(t)} ✕</button>`
+        `<button class="active-tag-pill" data-action="toggleTagFilter" data-arg1="${esc(t)}">${esc(t)} ${icon('x')}</button>`
     ).join('');
 }
 
@@ -777,10 +790,10 @@ function updateTagPickerBtn() {
     const btn = $('tagPickerBtn');
     if (!btn) return;
     if (state.activeTags.size > 0) {
-        btn.textContent = `🏷️ 标签(${state.activeTags.size})`;
+        btn.innerHTML = `${icon('tag')} 标签(${state.activeTags.size})`;
         btn.classList.add('active');
     } else {
-        btn.textContent = '🏷️ 标签';
+        btn.innerHTML = `${icon('tag')} 标签`;
         btn.classList.remove('active');
     }
 }
@@ -811,7 +824,7 @@ function renderTagPicker() {
         const sel = state.activeTags.has(FAV_TAG);
         favSection = `<div class="tagpicker-section">
             <div class="tagpicker-grid"><button class="tagpicker-chip ${sel ? 'selected' : ''}" data-action="tagPickerToggle" data-arg1="${esc(FAV_TAG)}">
-                <span class="tagpicker-chip-dot ${sel ? 'on' : ''}"></span>⭐ 收藏<span class="tagpicker-chip-count">${favCount}</span>
+                <span class="tagpicker-chip-dot ${sel ? 'on' : ''}"></span>${icon('star')} 收藏<span class="tagpicker-chip-count">${favCount}</span>
             </button></div>
         </div>`;
     }
@@ -894,46 +907,14 @@ function tagPickerScrollTo(id, btn) {
 
 // ==================== 清理待删除漫画 ====================
 
-function showConfirm(icon, title, desc, btnText, onConfirm) {
-    const overlay = document.createElement('div');
-    overlay.className = 'confirm-overlay';
-    overlay.innerHTML = `
-        <div class="confirm-card">
-            <div class="confirm-icon">${icon}</div>
-            <div class="confirm-title">${title}</div>
-            <div class="confirm-desc">${desc}</div>
-            <div class="confirm-btns">
-                <button class="confirm-btn confirm-cancel" id="confirmCancel">取消</button>
-                <button class="confirm-btn confirm-danger" id="confirmOk">${btnText}</button>
-            </div>
-        </div>`;
-    document.body.appendChild(overlay);
-    requestAnimationFrame(() => {
-        overlay.classList.add('visible');
-        overlay.querySelector('.confirm-card').classList.add('animate-in');
-    });
-    const close = () => {
-        overlay.classList.remove('visible');
-        setTimeout(() => overlay.remove(), 300);
-    };
-    overlay.querySelector('#confirmCancel').onclick = close;
-    overlay.querySelector('#confirmOk').onclick = () => { close(); onConfirm(); };
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-}
+// showConfirm 已由 app.js 提供
 
 async function cleanDelComics() {
-    let delList = [];
-    for (let i = 0; i < state.paths.length; i++) {
-        (state.comics[i] || []).forEach(c => {
-            if ((c.tags || []).includes('del')) {
-                delList.push({ pIdx: i, name: c.name, path: state.paths[i] });
-            }
-        });
-    }
+    const delList = getDelComics();
     if (!delList.length) return;
 
     showConfirm(
-        '🗑️',
+        icon('trash'),
         `清理 ${delList.length} 本待删除漫画？`,
         '文件将被永久删除，无法恢复。',
         `确认删除 ${delList.length} 本`,
@@ -948,9 +929,9 @@ async function cleanDelComics() {
                 state.random.allComics = [];
                 applyFilters();
                 loadStats();
-                showConfirm('✅', `已删除 ${res.deleted} 本漫画`, '文件已永久删除', '好的', () => {});
+                showConfirm(icon('checkCircle'), `已删除 ${res.deleted} 本漫画`, '文件已永久删除', '好的', () => {});
             } else {
-                showConfirm('❌', '清理失败', res.error || '未知错误', '关闭', () => {});
+                showConfirm(icon('xCircle'), '清理失败', res.error || '未知错误', '关闭', () => {});
             }
         }
     );
@@ -959,7 +940,7 @@ async function cleanDelComics() {
 // ==================== 重置阅读进度 ====================
 
 function resetAllProgress() {
-    showConfirm('📖', '重置所有漫画的阅读进度？', '将清除所有阅读记录和页码进度，无法恢复。', '确认重置', async () => {
+    showConfirm(icon('bookOpen'), '重置所有漫画的阅读进度？', '将清除所有阅读记录和页码进度，无法恢复。', '确认重置', async () => {
         try {
             const res = await apiPost('reset-progress', {});
             if (res.ok) {
@@ -969,12 +950,12 @@ function resetAllProgress() {
                 }
                 loadStats();
                 updateProgressButton();
-                showConfirm('✅', `已重置 ${res.reset} 本漫画的阅读进度`, '', '好的', () => {});
+                showConfirm(icon('checkCircle'), `已重置 ${res.reset} 本漫画的阅读进度`, '', '好的', () => {});
             } else {
-                showConfirm('❌', '重置失败', res.error || '未知错误', '关闭', () => {});
+                showConfirm(icon('xCircle'), '重置失败', res.error || '未知错误', '关闭', () => {});
             }
         } catch (e) {
-            showConfirm('❌', '重置失败', e.message, '关闭', () => {});
+            showConfirm(icon('xCircle'), '重置失败', e.message, '关闭', () => {});
         }
     });
 }
@@ -1009,7 +990,7 @@ function renderRecycleBin() {
     const list = getDelComics();
     const body = $('recycleBody');
     if (!list.length) {
-        body.innerHTML = '<div class="recycle-empty">回收站是空的 🎉</div>';
+        body.innerHTML = '<div class="recycle-empty">回收站是空的</div>';
         return;
     }
     let html = `<div class="recycle-count">共 ${list.length} 本待删除</div>`;
@@ -1017,7 +998,7 @@ function renderRecycleBin() {
     list.forEach(item => {
         const coverUrl = item.cover ? `/api/image?${new URLSearchParams({ path: item.path, comic: item.name, file: item.cover }).toString()}` : '';
         html += `<div class="recycle-card" data-pidx="${item.pIdx}" data-cidx="${item.cIdx}" data-name="${esc(item.name)}">
-            ${coverUrl ? `<img class="recycle-thumb" src="${coverUrl}" loading="lazy" decoding="async">` : '<div class="recycle-thumb-placeholder">📖</div>'}
+            ${coverUrl ? `<img class="recycle-thumb" src="${coverUrl}" loading="lazy" decoding="async">` : `<div class="recycle-thumb-placeholder">${icon('bookOpen')}</div>`}
             <div class="recycle-card-name">${esc(item.name)}</div>
             <div class="recycle-card-pages">${item.pages || '?'}P</div>
         </div>`;
@@ -1071,7 +1052,7 @@ async function recycleDelete() {
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
     if (!comic) return;
     $('recycleMenu').classList.add('hidden');
-    showConfirm('🗑️', `彻底删除「${name}」？`, '文件将被永久删除，无法恢复。', '确认删除', async () => {
+    showConfirm(icon('trash'), `彻底删除「${name}」？`, '文件将被永久删除，无法恢复。', '确认删除', async () => {
         try {
             const res = await apiPost('delete-comic', { path: state.paths[pIdx], name });
             if (res.ok) {
@@ -1083,10 +1064,10 @@ async function recycleDelete() {
                 loadStats();
                 renderRecycleBin();
             } else {
-                showConfirm('❌', '删除失败', res.error || '未知错误', '关闭', () => {});
+                showConfirm(icon('xCircle'), '删除失败', res.error || '未知错误', '关闭', () => {});
             }
         } catch (e) {
-            showConfirm('❌', '删除失败', e.message, '关闭', () => {});
+            showConfirm(icon('xCircle'), '删除失败', e.message, '关闭', () => {});
         }
     });
     state.recycleTarget = null;
@@ -1095,7 +1076,7 @@ async function recycleDelete() {
 function cleanAllRecycle() {
     const list = getDelComics();
     if (!list.length) return;
-    showConfirm('🗑️', `清理全部 ${list.length} 本待删除漫画？`, '文件将被永久删除，无法恢复。', `确认删除 ${list.length} 本`, async () => {
+    showConfirm(icon('trash'), `清理全部 ${list.length} 本待删除漫画？`, '文件将被永久删除，无法恢复。', `确认删除 ${list.length} 本`, async () => {
         const res = await apiPost('clean-del', {});
         if (res.ok) {
             list.forEach(item => {
@@ -1107,9 +1088,9 @@ function cleanAllRecycle() {
             applyFilters(false);
             loadStats();
             renderRecycleBin();
-            showConfirm('✅', `已删除 ${res.deleted} 本漫画`, '文件已永久删除', '好的', () => {});
+            showConfirm(icon('checkCircle'), `已删除 ${res.deleted} 本漫画`, '文件已永久删除', '好的', () => {});
         } else {
-            showConfirm('❌', '清理失败', res.error || '未知错误', '关闭', () => {});
+            showConfirm(icon('xCircle'), '清理失败', res.error || '未知错误', '关闭', () => {});
         }
     });
 }
@@ -1185,13 +1166,13 @@ function renderNavLinks() {
         const count = (state.comics[i] || []).length;
         const active = state.activePaths.has(i);
         return `<div class="nav-item ${active ? 'active' : ''}" data-action="togglePathFilter" data-arg1="${i}">
-            <span class="nav-item-icon">📂</span>
+            <span class="nav-item-icon">${icon('folder')}</span>
             <span class="nav-item-name">${esc(p.split(/[\\\/]/).pop())}</span>
             <span class="nav-item-count">${count}</span>
         </div>`;
     }).join('');
     const allActive = state.activePaths.size === 0;
-    $('navLinks').innerHTML = `<div class="nav-item nav-item-all ${allActive ? 'active' : ''}" data-action="clearPathFilter">📚 全部书库</div>` + libHtml;
+    $('navLinks').innerHTML = `<div class="nav-item nav-item-all ${allActive ? 'active' : ''}" data-action="clearPathFilter" data-tip="全部书库"><span class="nav-item-icon">${icon('book')}</span><span class="nav-item-name">全部书库</span></div>` + libHtml;
 }
 
 // ==================== 过滤与排序（合并所有书库） ====================
@@ -1238,6 +1219,10 @@ function getAllFiltered() {
         const vb = key === 'lastRead' ? (b.lastRead || 0) : b.mtime;
         return dir === 'desc' ? vb - va : va - vb;
     });
+    // 最近阅读模式：只保留有阅读记录的，最多 30 本
+    if (key === 'lastRead') {
+        all = all.filter(c => c.lastRead).slice(0, 30);
+    }
 
     state.allFiltered = all;
     return all;
@@ -1398,9 +1383,9 @@ function renderMoreItems(pageItems, startIdx) {
         card.dataset.cover = c.cover || '';
         card.innerHTML = `
             <img class="lazy-thumb" loading="lazy" decoding="async">
-            ${c.fav ? '<div class="fav-badge">⭐</div>' : ''}
+            ${c.fav ? `<div class="fav-badge">${icon('star')}</div>` : ''}
             ${c.pages ? `<span class="page-count">${c.pages}P</span>` : ''}
-            <button class="card-action-btn">⋯</button>
+            <button class="card-action-btn">${icon('moreH')}</button>
             <div class="info">${esc(c.name)}</div>
             ${tags ? `<div class="card-tags">${tags}</div>` : ''}
         `;
@@ -1468,6 +1453,22 @@ function hidePreview() {
     if (p && p.classList.contains('show')) p.classList.remove('show');
 }
 
+function toggleHoverPreview() {
+    state.hoverPreview = !state.hoverPreview;
+    localStorage.setItem('hoverPreviewOff', state.hoverPreview ? '0' : '1');
+    if (!state.hoverPreview) hidePreview();
+    updateHoverPreviewBtn();
+    showToast(state.hoverPreview ? '悬浮预览已开启' : '悬浮预览已关闭', 'success');
+}
+
+function updateHoverPreviewBtn() {
+    const btn = $('btnHoverPreview');
+    if (!btn) return;
+    btn.style.opacity = state.hoverPreview ? '' : '0.5';
+    const c = $('hoverPreviewState');
+    if (c) c.textContent = state.hoverPreview ? '开' : '关';
+}
+
 // ==================== 封面加载 ====================
 
 function coverUrl(p, c, coverFile) {
@@ -1521,9 +1522,6 @@ function showCtxMenu(e, pIdx, name) {
 
     const menu = $('contextMenu');
     $('ctxInfo').innerText = `${name} · ${comic.pages || '?'}P`;
-    menu.querySelectorAll('.ctx-item')[0].innerText = comic.fav ? '💔 取消收藏' : '⭐ 添加收藏';
-    const isDel = (comic.tags || []).includes('del');
-    $('ctxDelItem').innerText = isDel ? '↩️ 取消待删除' : '🗑️ 标记待删除';
     menu.classList.remove('hidden');
 
     let x = e.clientX || e.pageX || 0, y = e.clientY || e.pageY || 0;
@@ -1537,7 +1535,104 @@ function showCtxMenu(e, pIdx, name) {
     });
 }
 
-async function ctxToggleFav() {
+function ctxOpenDetail() {
+    if (!state.ctxTarget) return;
+    $('contextMenu').classList.add('hidden');
+    openDetailPanel(state.ctxTarget.pIdx, state.ctxTarget.name);
+}
+
+async function ctxToggleDel() {
+    if (!state.ctxTarget) return;
+    $('contextMenu').classList.add('hidden');
+    const { pIdx, name } = state.ctxTarget;
+    const comic = (state.comics[pIdx] || []).find(c => c.name === name);
+    if (!comic) return;
+    const tags = comic.tags || [];
+    const hasDel = tags.includes('del');
+    const newTags = hasDel ? tags.filter(t => t !== 'del') : [...tags, 'del'];
+    const res = await apiPost('meta', { path: state.paths[pIdx], name, tags: newTags });
+    if (res.ok) {
+        comic.tags = res.tags;
+        const card = document.querySelector(`.comic-card[data-name="${CSS.escape(name)}"]`);
+        if (card) card.classList.toggle('is-del', res.tags.includes('del'));
+        showToast(hasDel ? '已取消待删除' : '已标记待删除', 'success');
+        loadStats();
+    }
+}
+
+// ==================== 漫画详情面板 ====================
+
+function openDetailPanel(pIdx, name) {
+    const comic = (state.comics[pIdx] || []).find(c => c.name === name);
+    if (!comic) return;
+    state.ctxTarget = { pIdx, name };
+
+    // 封面
+    const path = state.paths[pIdx];
+    const coverImg = $('detailCover');
+    if (comic.cover) {
+        coverImg.src = coverUrl(path, name, comic.cover);
+        coverImg.style.display = '';
+    } else {
+        coverImg.src = '';
+        coverImg.style.display = 'none';
+    }
+
+    // 标题 + 副标题
+    $('detailTitle').innerText = name;
+    const libName = path.split('\\').pop() || path;
+    const dateStr = comic.mtime ? new Date(comic.mtime * 1000).toLocaleDateString('zh-CN') : '';
+    let subtitle = `${comic.pages || '?'}P · ${libName}`;
+    if (dateStr) subtitle += ` · ${dateStr}`;
+    if (comic.jmId) subtitle += ` · JM${comic.jmId}`;
+    $('detailSubtitle').innerText = subtitle;
+
+    // 快捷操作按钮状态
+    renderDetailActions(comic);
+
+    // 阅读信息
+    renderDetailInfo(comic);
+
+    // 标签区域
+    renderTagList(comic.tags || []);
+    renderTagSuggestions(comic.tags || []);
+    $('tagInput').value = '';
+
+    $('tagOverlay').classList.remove('hidden');
+    requestAnimationFrame(() => { $('tagOverlay').classList.add('visible'); $('tagModal').classList.add('animate-in'); });
+}
+
+function renderDetailActions(comic) {
+    $('detailFavBtn').innerHTML = comic.fav ? `${icon('heart')} 已收藏` : `${icon('star')} 收藏`;
+    $('detailFavBtn').classList.toggle('active', !!comic.fav);
+    const isDel = (comic.tags || []).includes('del');
+    $('detailDelBtn').innerHTML = isDel ? `${icon('refresh')} 取消待删除` : `${icon('trash')} 待删除`;
+    $('detailDelBtn').classList.toggle('active', isDel);
+}
+
+function renderDetailInfo(comic) {
+    let html = '';
+    // 阅读进度
+    if (comic.readProgress > 0 && comic.pages > 0) {
+        const pct = Math.min(100, Math.round(comic.readProgress / comic.pages * 100));
+        html += `<div class="detail-info-row">
+            <span class="detail-info-label">阅读进度</span>
+            <div class="detail-progress-bar"><div class="detail-progress-fill" style="width:${pct}%"></div></div>
+            <span class="detail-info-value">第${comic.readProgress}页 / 共${comic.pages}页</span>
+        </div>`;
+    }
+    // 上次阅读
+    if (comic.lastRead) {
+        const t = relTime(comic.lastRead) || new Date(comic.lastRead * 1000).toLocaleString('zh-CN');
+        html += `<div class="detail-info-row"><span class="detail-info-label">上次阅读</span><span class="detail-info-value">${esc(t)}</span></div>`;
+    }
+    if (!html) {
+        html = '<div class="detail-info-row"><span class="detail-info-label">暂无阅读记录</span></div>';
+    }
+    $('detailInfo').innerHTML = html;
+}
+
+async function detailToggleFav() {
     if (!state.ctxTarget) return;
     const { pIdx, name } = state.ctxTarget;
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
@@ -1545,21 +1640,14 @@ async function ctxToggleFav() {
     const res = await apiPost('meta', { path: state.paths[pIdx], name, fav: !comic.fav });
     if (res.ok) {
         comic.fav = res.fav;
-        // 更新已渲染的卡片
         const card = document.querySelector(`.comic-card[data-name="${CSS.escape(name)}"]`);
         if (card) card.classList.toggle('is-fav', res.fav);
+        renderDetailActions(comic);
         loadStats();
     }
-    $('contextMenu').classList.add('hidden');
 }
 
-function ctxOpenTagModal() {
-    if (!state.ctxTarget) return;
-    $('contextMenu').classList.add('hidden');
-    openTagModal(state.ctxTarget.pIdx, state.ctxTarget.name);
-}
-
-async function ctxToggleDel() {
+async function detailToggleDel() {
     if (!state.ctxTarget) return;
     const { pIdx, name } = state.ctxTarget;
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
@@ -1572,23 +1660,51 @@ async function ctxToggleDel() {
         comic.tags = res.tags;
         const card = document.querySelector(`.comic-card[data-name="${CSS.escape(name)}"]`);
         if (card) card.classList.toggle('is-del', res.tags.includes('del'));
+        renderDetailActions(comic);
+        renderTagList(res.tags);
+        renderTagSuggestions(res.tags);
         loadStats();
     }
-    $('contextMenu').classList.add('hidden');
 }
 
-// ==================== 标签管理 ====================
-
-function openTagModal(pIdx, name) {
+async function detailResetProgress() {
+    if (!state.ctxTarget) return;
+    const { pIdx, name } = state.ctxTarget;
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
     if (!comic) return;
-    state.ctxTarget = { pIdx, name };
-    $('tagModalComic').innerText = name;
-    renderTagList(comic.tags || []);
-    renderTagSuggestions(comic.tags || []);
-    $('tagInput').value = '';
-    $('tagOverlay').classList.remove('hidden');
-    requestAnimationFrame(() => { $('tagOverlay').classList.add('visible'); $('tagModal').classList.add('animate-in'); });
+    const res = await apiPost('meta', { path: state.paths[pIdx], name, lastRead: 0, readProgress: 0 });
+    if (res.ok) {
+        comic.lastRead = 0;
+        comic.readProgress = 0;
+        renderDetailInfo(comic);
+        toast('阅读进度已重置');
+    }
+}
+
+async function detailDeleteComic() {
+    if (!state.ctxTarget) return;
+    const { pIdx, name } = state.ctxTarget;
+    closeTagModal();
+    showConfirm(icon('trash'), `删除「${name}」？`, '文件将被永久删除，无法恢复。', '确认删除', async () => {
+        try {
+            const res = await apiPost('delete-comic', { path: state.paths[pIdx], name });
+            if (res.ok) {
+                const arr = state.comics[pIdx];
+                if (arr) {
+                    const idx = arr.findIndex(c => c.name === name);
+                    if (idx >= 0) arr.splice(idx, 1);
+                }
+                invalidateCache();
+                applyFilters();
+                loadStats();
+                showToast('已删除', 'success');
+            } else {
+                showConfirm(icon('xCircle'), '删除失败', res.error || '未知错误', '关闭', () => {});
+            }
+        } catch (e) {
+            showConfirm(icon('xCircle'), '删除失败', e.message, '关闭', () => {});
+        }
+    });
 }
 
 function closeTagModal() {
@@ -1598,7 +1714,7 @@ function closeTagModal() {
 
 function renderTagList(tags) {
     $('tagList').innerHTML = tags.map(t =>
-        `<span class="tag-chip">${esc(t)} <button class="tag-remove" data-action="removeTag" data-arg1="${esc(t)}">✕</button></span>`
+        `<span class="tag-chip">${esc(t)} <button class="tag-remove" data-action="removeTag" data-arg1="${esc(t)}">${icon('x')}</button></span>`
     ).join('') || '<span class="tag-empty">暂无标签</span>';
 }
 
@@ -1632,15 +1748,15 @@ function renderTagSuggestions(currentTags) {
     for (const [cat, items] of Object.entries(grouped)) {
         html += `<div class="tag-suggest-label">${esc(cat)}</div>`;
         html += items.map(i => {
-            const hidden = state.hiddenTags.has(i.tag);
-            return `<button class="tag-suggest-pill ${hidden ? '' : 'tag-suggest-visible'}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
+            const onHomepage = state.homepageTags.has(i.tag);
+            return `<button class="tag-suggest-pill ${onHomepage ? 'tag-suggest-visible' : ''}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
         }).join('');
     }
     if (uncategorized.length) {
         html += `<div class="tag-suggest-label">其他</div>`;
         html += uncategorized.map(i => {
-            const hidden = state.hiddenTags.has(i.tag);
-            return `<button class="tag-suggest-pill ${hidden ? '' : 'tag-suggest-visible'}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
+            const onHomepage = state.homepageTags.has(i.tag);
+            return `<button class="tag-suggest-pill ${onHomepage ? 'tag-suggest-visible' : ''}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
         }).join('');
     }
     $('tagSuggestions').innerHTML = html;
@@ -1678,7 +1794,7 @@ async function addNewTagWithCat(tag, cat) {
         if (!state.tagCategories[cat].includes(tag)) state.tagCategories[cat].push(tag);
         saveTagConfig();
     }
-    state.hiddenTags.add(tag);
+    // 新标签默认不在主页显示（不加入 homepageTags）
     await addTagDirect(tag);
     $('tagInput').value = '';
 }
@@ -1688,11 +1804,10 @@ async function addTagDirect(tag) {
     const { pIdx, name } = state.ctxTarget;
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
     if (!comic) return;
-    const isNew = !state.allTags[tag];
     const res = await apiPost('meta', { path: state.paths[pIdx], name, addTag: tag });
     if (res.ok) {
         comic.tags = res.tags;
-        if (isNew) state.hiddenTags.add(tag);
+        // 新标签默认不在主页显示（不加入 homepageTags 白名单）
         await loadStats();
         renderTagList(res.tags);
         renderTagSuggestions(res.tags);
@@ -1769,22 +1884,22 @@ function renderTagManager() {
     const catNames = Object.keys(grouped);
     const totalMatched = Object.values(grouped).flat().length + uncategorized.length;
     const totalTags = Object.keys(state.allTags).filter(t => t !== 'del').length;
-    const visibleTags = Object.keys(state.allTags).filter(t => t !== 'del' && t !== FAV_TAG && !state.hiddenTags.has(t)).length + (state.allTags[FAV_TAG] ? 1 : 0);
+    const visibleTags = Object.keys(state.allTags).filter(t => t !== 'del' && t !== FAV_TAG && state.homepageTags.has(t)).length + (state.allTags[FAV_TAG] ? 1 : 0);
 
     // ===== 侧边栏 =====
     let sidebarHtml = '';
     // 收藏
     const favCount = state.allTags[FAV_TAG] || 0;
     if (favCount > 0 && matchTag(FAV_TAG)) {
-        sidebarHtml += `<div class="tagmgr-nav-item fav" data-action="tagMgrScrollTo" data-arg1="__fav__">⭐ 收藏 <span class="tagmgr-nav-count">${favCount}</span></div>`;
+        sidebarHtml += `<div class="tagmgr-nav-item fav" data-action="tagMgrScrollTo" data-arg1="__fav__">${icon('star')} 收藏 <span class="tagmgr-nav-count">${favCount}</span></div>`;
     }
-    sidebarHtml += `<div class="tagmgr-nav-item active" data-action="tagMgrScrollTo" data-arg1="all">📋 全部 <span class="tagmgr-nav-count">${totalTags}</span></div>`;
+    sidebarHtml += `<div class="tagmgr-nav-item active" data-action="tagMgrScrollTo" data-arg1="all">${icon('list')} 全部 <span class="tagmgr-nav-count">${totalTags}</span></div>`;
     for (const c of catNames) {
         const count = grouped[c].length;
-        sidebarHtml += `<div class="tagmgr-nav-item" data-action="tagMgrScrollTo" data-arg1="${esc(c)}">📁 ${esc(c)} <span class="tagmgr-nav-count">${count}</span></div>`;
+        sidebarHtml += `<div class="tagmgr-nav-item" data-action="tagMgrScrollTo" data-arg1="${esc(c)}">${icon('folder')} ${esc(c)} <span class="tagmgr-nav-count">${count}</span></div>`;
     }
     if (uncategorized.length) {
-        sidebarHtml += `<div class="tagmgr-nav-item" data-action="tagMgrScrollTo" data-arg1="__uncat__">📂 未分类 <span class="tagmgr-nav-count">${uncategorized.length}</span></div>`;
+        sidebarHtml += `<div class="tagmgr-nav-item" data-action="tagMgrScrollTo" data-arg1="__uncat__">${icon('folder')} 未分类 <span class="tagmgr-nav-count">${uncategorized.length}</span></div>`;
     }
     // 新建分类
     sidebarHtml += `<div class="tagmgr-nav-new">
@@ -1800,7 +1915,8 @@ function renderTagManager() {
         <span>共 <b>${totalTags}</b> 个标签</span>
         ${keywords.length ? `<span>· 匹配 <b>${totalMatched}</b></span>` : ''}
         <span>· 主页显示 <b>${visibleTags}</b></span>
-    </div>`;
+    </div>
+    <div class="tagmgr-hint">${icon('info')} 开关控制标签是否出现在主页顶部；新标签默认不在主页显示，需手动开启</div>`;
 
     if (totalMatched === 0) {
         mainHtml += '<div class="tagmgr-empty">没有匹配的标签</div>';
@@ -1808,13 +1924,13 @@ function renderTagManager() {
         return;
     }
 
-    const renderCat = (catName, items, id, icon) => {
+    const renderCat = (catName, items, id, ic) => {
         if (!items.length) return '';
         let h = `<div class="tagmgr-cat" id="tm-${id}">
             <div class="tagmgr-cat-header">
-                <span class="tagmgr-cat-name">${icon || '📁'} ${id === '__uncat__' ? '未分类' : esc(catName)}</span>
+                <span class="tagmgr-cat-name">${ic || icon('folder')} ${id === '__uncat__' ? '未分类' : esc(catName)}</span>
                 <span class="tagmgr-cat-count">${items.length}</span>
-                ${id !== '__uncat__' && id !== '__fav__' ? `<button class="tagmgr-cat-del" data-action="deleteTagCategory" data-arg1="${esc(catName)}" title="删除分类">✕</button>` : ''}
+                ${id !== '__uncat__' && id !== '__fav__' ? `<button class="tagmgr-cat-del" data-action="deleteTagCategory" data-arg1="${esc(catName)}" title="删除分类">${icon('x')}</button>` : ''}
             </div>
             <div class="tagmgr-cat-grid">${items.map(i => tagMgrItem(i.tag, i.count)).join('')}</div>
         </div>`;
@@ -1825,12 +1941,12 @@ function renderTagManager() {
     if (favCount > 0 && matchTag(FAV_TAG)) {
         mainHtml += `<div class="tagmgr-cat" id="tm-__fav__">
             <div class="tagmgr-cat-header">
-                <span class="tagmgr-cat-name">⭐ 收藏</span>
+                <span class="tagmgr-cat-name">${icon('star')} 收藏</span>
                 <span class="tagmgr-cat-count">${favCount}</span>
             </div>
             <div class="tagmgr-cat-grid">
                 <div class="tagmgr-card fav-card">
-                    <span class="tagmgr-card-name">⭐ 收藏（系统标签）</span>
+                    <span class="tagmgr-card-name">${icon('star')} 收藏（系统标签）</span>
                     <span class="tagmgr-card-count">${favCount}</span>
                 </div>
             </div>
@@ -1841,7 +1957,7 @@ function renderTagManager() {
         mainHtml += renderCat(cat, items, cat);
     }
     if (uncategorized.length) {
-        mainHtml += renderCat('', uncategorized, '__uncat__', '📂');
+        mainHtml += renderCat('', uncategorized, '__uncat__', icon('folder'));
     }
 
     $('tagMgrMain').innerHTML = mainHtml;
@@ -1860,7 +1976,7 @@ function tagMgrScrollTo(id, btn) {
 }
 
 function tagMgrItem(tag, count) {
-    const hidden = state.hiddenTags.has(tag);
+    const onHomepage = state.homepageTags.has(tag);
     const catOpts = Object.keys(state.tagCategories || {}).map(c =>
         `<option value="${esc(c)}">${esc(c)}</option>`
     ).join('');
@@ -1870,9 +1986,9 @@ function tagMgrItem(tag, count) {
         }
         return '';
     })();
-    return `<div class="tagmgr-card ${hidden ? 'is-hidden' : ''}" data-tag="${esc(tag)}">
+    return `<div class="tagmgr-card ${onHomepage ? '' : 'is-hidden'}" data-tag="${esc(tag)}">
         <div class="tagmgr-card-top">
-            <button class="tagmgr-toggle ${hidden ? '' : 'on'}" data-action="toggleTagVisibility" data-arg1="${esc(tag)}" title="${hidden ? '在主页显示' : '在主页隐藏'}">
+            <button class="tagmgr-toggle ${onHomepage ? 'on' : ''}" data-action="toggleTagVisibility" data-arg1="${esc(tag)}" title="${onHomepage ? '从主页隐藏' : '在主页显示'}">
                 <span class="tagmgr-toggle-dot"></span>
             </button>
             <span class="tagmgr-card-name" data-action="filterByTagFromMgr" data-arg1="${esc(tag)}">${esc(tag)}</span>
@@ -1884,33 +2000,38 @@ function tagMgrItem(tag, count) {
                 ${catOpts}
                 <option value="__new__">+ 新建</option>
             </select>
-            <button class="tagmgr-card-btn rename" data-action="renameTag" data-arg1="${esc(tag)}" title="重命名">✏️</button>
-            <button class="tagmgr-card-btn delete" data-action="deleteTag" data-arg1="${esc(tag)}" title="全局删除">🗑️</button>
+            <button class="tagmgr-card-btn rename" data-action="renameTag" data-arg1="${esc(tag)}" title="重命名">${icon('edit')}</button>
+            <button class="tagmgr-card-btn delete" data-action="deleteTag" data-arg1="${esc(tag)}" title="全局删除">${icon('trash')}</button>
         </div>
     </div>`;
 }
 
 function toggleTagVisibility(tag) {
-    if (state.hiddenTags.has(tag)) state.hiddenTags.delete(tag);
-    else state.hiddenTags.add(tag);
+    if (state.homepageTags.has(tag)) state.homepageTags.delete(tag);
+    else state.homepageTags.add(tag);
     saveTagConfig();
     renderTagBar();
     renderTagManager();
 }
 
 function tagMgrShowAll() {
-    state.hiddenTags.clear();
+    // 把所有标签加入主页白名单
+    for (const t of Object.keys(state.allTags)) { if (t !== 'del' && t !== FAV_TAG) state.homepageTags.add(t); }
     saveTagConfig(); renderTagBar(); renderTagManager();
 }
 function tagMgrHideAll() {
-    for (const t of Object.keys(state.allTags)) { if (t !== 'del' && t !== FAV_TAG) state.hiddenTags.add(t); }
+    // 清空主页白名单（收藏除外，收藏始终显示）
+    state.homepageTags.clear();
     saveTagConfig(); renderTagBar(); renderTagManager();
 }
 function tagMgrInvert() {
+    // 反转：主页显示的变隐藏，隐藏的变显示
     const next = new Set();
-    for (const t of Object.keys(state.allTags)) { if (t !== 'del' && t !== FAV_TAG && !state.hiddenTags.has(t)) next.add(t); }
-    state.hiddenTags.clear();
-    for (const t of Object.keys(state.allTags)) { if (t !== 'del' && t !== FAV_TAG && !next.has(t)) state.hiddenTags.add(t); }
+    for (const t of Object.keys(state.allTags)) {
+        if (t === 'del' || t === FAV_TAG) continue;
+        if (!state.homepageTags.has(t)) next.add(t);
+    }
+    state.homepageTags = next;
     saveTagConfig(); renderTagBar(); renderTagManager();
 }
 
@@ -1954,7 +2075,7 @@ function createTagCategory() {
 }
 
 function deleteTagCategory(cat) {
-    showConfirm('🗑️', `删除分类「${cat}」？`, '标签不会被删除。', '确认删除', () => {
+    showConfirm(icon('trash'), `删除分类「${cat}」？`, '标签不会被删除。', '确认删除', () => {
         delete state.tagCategories[cat];
         saveTagConfig();
         renderTagManager();
@@ -1965,7 +2086,7 @@ function renameTag(oldTag) {
     const newName = prompt(`重命名标签「${oldTag}」为：`, oldTag);
     if (!newName || !newName.trim() || newName.trim() === oldTag) return;
     const trimmed = newName.trim();
-    showConfirm('✏️', `重命名「${oldTag}」→「${trimmed}」？`, `将更新所有漫画上的该标签。`, '确认重命名', async () => {
+    showConfirm(icon('edit'), `重命名「${oldTag}」→「${trimmed}」？`, `将更新所有漫画上的该标签。`, '确认重命名', async () => {
         try {
             const res = await apiPost('rename-tag', { oldName: oldTag, newName: trimmed });
             if (res.ok) {
@@ -1974,9 +2095,9 @@ function renameTag(oldTag) {
                     state.allTags[trimmed] = state.allTags[oldTag];
                     delete state.allTags[oldTag];
                 }
-                if (state.hiddenTags.has(oldTag)) {
-                    state.hiddenTags.delete(oldTag);
-                    state.hiddenTags.add(trimmed);
+                if (state.homepageTags.has(oldTag)) {
+                    state.homepageTags.delete(oldTag);
+                    state.homepageTags.add(trimmed);
                 }
                 for (const [cat, tags] of Object.entries(state.tagCategories)) {
                     const idx = tags.indexOf(oldTag);
@@ -2007,13 +2128,13 @@ function renameTag(oldTag) {
 }
 
 function deleteTag(tagName) {
-    showConfirm('🗑️', `全局删除标签「${tagName}」？`, `将从所有漫画上移除此标签，无法恢复。`, '确认删除', async () => {
+    showConfirm(icon('trash'), `全局删除标签「${tagName}」？`, `将从所有漫画上移除此标签，无法恢复。`, '确认删除', async () => {
         try {
             const res = await apiPost('delete-tag', { name: tagName });
             if (res.ok) {
                 // 更新本地状态
                 delete state.allTags[tagName];
-                state.hiddenTags.delete(tagName);
+                state.homepageTags.delete(tagName);
                 for (const [cat, tags] of Object.entries(state.tagCategories)) {
                     state.tagCategories[cat] = tags.filter(t => t !== tagName);
                     if (!state.tagCategories[cat].length) delete state.tagCategories[cat];
@@ -2051,14 +2172,16 @@ async function openComic(pIdx, cIdx) {
         const saved = comic.readProgress || 0;
         state.idx = (saved > 0 && saved < (data.pages || []).length) ? saved : 0;
         state.dbl = window.innerWidth > window.innerHeight;
-        $('readerTitle').innerText = name;
+        $('modeBtn').innerText = state.dbl ? '双' : '单';
+        
         $('reader').classList.remove('hidden');
         document.body.style.overflow = 'hidden';
         state.readerOpen = true;
         history.pushState({ reader: true }, '', '#reader');
         comic.lastRead = Date.now();
         apiPost('meta', { path, name, lastRead: comic.lastRead });
-        renderPages(); showUI();
+        renderPages();
+        showReaderUI();
     } catch (e) {
         console.error('打开漫画失败:', e);
     }
@@ -2068,6 +2191,7 @@ async function renderPages() {
     const t = ++state.token, { p, n, pgs } = state.cur, i = state.idx, total = pgs.length;
     const step = state.dbl ? 2 : 1;
     $('pageProgress').innerText = `${i + 1}${state.dbl && i + 1 < total ? '-' + Math.min(i + 2, total) : ''} / ${total}`;
+    updatePageSlider();
     const getUrl = idx => idx >= 0 && idx < total ? `/api/image?${new URLSearchParams({ path: p, comic: n, file: pgs[idx] }).toString()}` : null;
     const loadImg = url => url ? new Promise(res => { const img = new Image(); img.className = 'comic-img'; img.onload = () => res(img); img.onerror = () => res(null); img.src = url; }) : Promise.resolve(null);
     const imgs = await Promise.all([loadImg(getUrl(i)), state.dbl ? loadImg(getUrl(i + 1)) : null]);
@@ -2086,6 +2210,30 @@ async function renderPages() {
         const u = getUrl(x);
         if (u) { const pf = new Image(); pf.src = u; }
     }
+}
+
+function initPageSlider() {
+    const slider = $('pageSlider');
+    slider.addEventListener('input', () => {
+        showReaderUI(); // 拖动时重置隐藏计时
+        const val = parseInt(slider.value);
+        if (!val || val < 1 || val > state.cur.pgs.length) return;
+        state.idx = val - 1;
+        renderPages();
+        saveReadProgress();
+    });
+    // 拖动期间不自动消失
+    slider.addEventListener('mousedown', () => clearTimeout(state.uiTimer));
+    slider.addEventListener('touchstart', () => clearTimeout(state.uiTimer), { passive: true });
+    slider.addEventListener('mouseup', () => showReaderUI());
+    slider.addEventListener('touchend', () => showReaderUI());
+}
+function updatePageSlider() {
+    const slider = $('pageSlider');
+    const total = state.cur.pgs.length;
+    slider.max = total;
+    slider.value = state.idx + 1;
+    slider.parentElement.classList.toggle('rtl', state.rtl);
 }
 
 let _saveProgressTimer = null;
@@ -2122,20 +2270,21 @@ function handleAction(clientX) {
         const w = window.innerWidth;
         if (clientX > w * 0.7) turnPage(state.rtl ? -1 : 1);
         else if (clientX < w * 0.3) turnPage(state.rtl ? 1 : -1);
-        else toggleUI();
+        else { toggleReaderUI(); }
     }, 300);
 }
 
-$('readerContent').onmousedown = e => { if (!state.isMobile && e.button === 0) handleAction(e.clientX); };
-$('readerContent').ontouchstart = e => { state.touchX = e.touches[0].clientX; };
-$('readerContent').ontouchend = e => {
-    const diff = state.touchX - e.changedTouches[0].clientX;
-    if (Math.abs(diff) > 60) turnPage(diff > 0 ? (state.rtl ? -1 : 1) : (state.rtl ? 1 : -1));
-    else handleAction(e.changedTouches[0].clientX);
-};
+// reader 事件绑定移到 initApp() 中，确保 DOM 已就绪
 
-function showUI() { $('reader').classList.add('show-ui'); clearTimeout(state.uiTimer); state.uiTimer = setTimeout(() => $('reader').classList.remove('show-ui'), 3500); }
-function toggleUI() { $('reader').classList.contains('show-ui') ? $('reader').classList.remove('show-ui') : showUI(); }
+function showReaderUI() {
+    $('reader').classList.add('show-ui');
+    clearTimeout(state.uiTimer);
+    state.uiTimer = setTimeout(() => $('reader').classList.remove('show-ui'), 3500);
+}
+function toggleReaderUI() {
+    $('reader').classList.contains('show-ui') ? $('reader').classList.remove('show-ui') : showReaderUI();
+}
+
 function closeReader(fromPopstate) {
     // 取消待保存的 debounce，避免用旧进度覆盖
     clearTimeout(_saveProgressTimer);
@@ -2146,12 +2295,14 @@ function closeReader(fromPopstate) {
         if (comic) comic.readProgress = state.idx;
         apiPost('meta', { path: state.cur.p, name: state.cur.n, readProgress: state.idx });
     }
+    clearTimeout(state.uiTimer);
+    $('reader').classList.remove('show-ui');
     $('reader').classList.add('hidden');
     document.body.style.overflow = '';
     state.readerOpen = false;
     if (!fromPopstate && history.state && history.state.reader) history.back();
 }
-function toggleMode() { state.dbl = !state.dbl; $('modeBtn').innerText = state.dbl ? '双页' : '单页'; renderPages(); }
+function toggleMode() { state.dbl = !state.dbl; $('modeBtn').innerText = state.dbl ? '双' : '单'; renderPages(); }
 function toggleDir() { state.rtl = !state.rtl; $('dirBtn').innerText = state.rtl ? 'RTL' : 'LTR'; renderPages(); }
 function toggleSidebar() {
     const sidebar = $('sidebar');
@@ -2165,11 +2316,68 @@ function closeSidebar() {
     sidebar.classList.remove('open');
     if (backdrop) backdrop.classList.remove('show');
 }
+function toggleSidebarCollapse() {
+    const app = document.querySelector('.app');
+    app.classList.toggle('sidebar-collapsed');
+    updateCollapseBtn();
+}
+function updateCollapseBtn() {
+    const btn = $('collapseBtn');
+    if (!btn) return;
+    const collapsed = document.querySelector('.app').classList.contains('sidebar-collapsed');
+    btn.innerHTML = collapsed ? icon('chevronRight') : icon('chevronLeft');
+    btn.title = collapsed ? '展开侧栏' : '收缩侧栏';
+}
+function initSidebarCollapse() {
+    // 每次加载页面默认收起
+    document.querySelector('.app').classList.add('sidebar-collapsed');
+    updateCollapseBtn();
+}
 function scrollToTop() {
     $('bookshelf').scrollTo({ top: 0, behavior: 'smooth' });
     if (state.isMobile) closeSidebar();
 }
-function toggleFS() { if (!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
+function toggleFS() { toggleAppFullscreen(); }
+
+// ==================== 应用全屏 ====================
+
+function enterAppFullscreen() {
+    state.appFullscreen = true;
+    document.documentElement.requestFullscreen().catch(() => { state.appFullscreen = false; });
+    updateFullscreenBtns();
+}
+function exitAppFullscreen() {
+    state.appFullscreen = false;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    updateFullscreenBtns();
+}
+function toggleAppFullscreen() {
+    if (state.appFullscreen) exitAppFullscreen();
+    else enterAppFullscreen();
+}
+function updateFullscreenBtns() {
+    document.querySelectorAll('[data-action="toggleFullscreen"]').forEach(el => {
+        el.classList.toggle('active', state.appFullscreen);
+    });
+}
+function handleEscAction() {
+    if (!$('reader').classList.contains('hidden')) { closeReader(); return; }
+    if (!$('contextMenu').classList.contains('hidden')) { $('contextMenu').classList.add('hidden'); return; }
+    if (!$('recycleMenu').classList.contains('hidden')) { $('recycleMenu').classList.add('hidden'); return; }
+    if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
+    if (!$('tagMgrOverlay').classList.contains('hidden')) { closeTagManager(); return; }
+    if (!$('tagPickerOverlay').classList.contains('hidden')) { closeTagPicker(); return; }
+    if (!$('jmOverlay').classList.contains('hidden')) { closeJmPanel(); return; }
+    if (!$('randomOverlay').classList.contains('hidden')) { closeRandom(); return; }
+    if (!$('recycleOverlay').classList.contains('hidden')) { closeRecycleBin(); return; }
+}
+// 浏览器退出全屏时（ESC 触发），若应用全屏仍开启则重新进入并执行 ESC 动作
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && state.appFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => { state.appFullscreen = false; updateFullscreenBtns(); });
+        handleEscAction();
+    }
+});
 
 // ==================== 随机漫画 ====================
 
@@ -2231,14 +2439,14 @@ function openDlStatus() {
 function closeDlStatus() {
     const overlay = $('dlOverlay');
     overlay.classList.remove('visible');
-    setTimeout(() => { overlay.classList.remove('hidden'); $('dlPanel').classList.remove('animate-in'); }, 300);
+    setTimeout(() => { overlay.classList.add('hidden'); $('dlPanel').classList.remove('animate-in'); }, 300);
 }
 
-async function renderDlStatus() {
+async function renderDlStatus(cachedData) {
     const body = $('dlPanelBody');
     if (!body) return;
     try {
-        const data = await api('download/history');
+        const data = cachedData || await api('download/history');
         const { active = [], completed = [], errors = [] } = data;
         if (!active.length && !completed.length && !errors.length) {
             body.innerHTML = '<div class="dl-panel-empty">暂无下载记录</div>';
@@ -2264,7 +2472,7 @@ async function renderDlStatus() {
                 html += `<div class="dl-panel-item ${isDone ? 'is-done' : 'is-error'}">
                     <span class="p-id">JM${esc(t.id)}</span>
                     <span class="p-name">${esc(t.name || '')}</span>
-                    <span class="p-status">${rel ? esc(rel) + ' ' : ''}${isDone ? '✅' : '❌'}</span>
+                    <span class="p-status">${rel ? esc(rel) + ' ' : ''}${isDone ? icon('checkCircle') : icon('xCircle')}</span>
                 </div>`;
             });
         }
@@ -2281,16 +2489,11 @@ function openJmPanel() {
     $('jmOverlay').classList.remove('hidden');
     $('jmPanel').classList.remove('minimized');
     $('jmBody').classList.remove('collapsed');
-    $('jmMinBtn').innerText = '—';
+    $('jmMinBtn').innerHTML = icon('chevronDown');
     requestAnimationFrame(() => { $('jmOverlay').classList.add('visible'); $('jmPanel').classList.add('animate-in'); });
     renderJmHistory();
     renderDownloadHistory();
     $('jmInput').focus();
-}
-
-function restoreActiveDownloadStatus() {
-    // This function is now handled by renderDownloadHistory
-    renderDownloadHistory();
 }
 
 function closeJmPanel() {
@@ -2306,11 +2509,11 @@ function toggleMinimizeJm() {
     if (panel.classList.contains('minimized')) {
         panel.classList.remove('minimized');
         body.classList.remove('collapsed');
-        btn.innerText = '—';
+        btn.innerHTML = icon('chevronDown');
     } else {
         panel.classList.add('minimized');
         body.classList.add('collapsed');
-        btn.innerText = '□';
+        btn.innerHTML = icon('chevronUp');
     }
 }
 
@@ -2326,18 +2529,20 @@ async function doJmSearch() {
     if (!raw) return;
     const tokens = raw.split(/[,，\s\n]+/).filter(Boolean);
     const ids = tokens.map(t => t.replace(/^(jm)/i, '').trim()).filter(t => /^\d+$/.test(t));
-    if (!ids.length) { $('jmResult').innerHTML = `<div class="jm-error">请输入有效的 JM 号</div>`; return; }
+    if (!ids.length) {
+    $('jmResult').innerHTML = `<div class="jm-error">请输入有效的 JM 号</div>`; return; }
 
     if (ids.length > 1) {
         // 多个 ID 时直接批量下载
-        $('jmResult').innerHTML = `<div class="jm-loading"><div class="search-spinner"></div><p>正在启动 ${ids.length} 个下载任务...</p><p style="font-size:12px;color:var(--text-3);margin-top:4px">将并行下载，关闭页面不影响进度</p></div>`;
+    $('jmResult').innerHTML = `<div class="jm-loading"><div class="search-spinner"></div><p>正在启动 ${ids.length} 个下载任务...</p><p style="font-size:12px;color:var(--text-3);margin-top:4px">将并行下载，关闭页面不影响进度</p></div>`;
         try {
             const data = await apiPost('download', { ids });
-            if (data.error) { $('jmResult').innerHTML = `<div class="jm-error">${esc(data.error)}</div>`; return; }
+            if (data.error) {
+    $('jmResult').innerHTML = `<div class="jm-error">${esc(data.error)}</div>`; return; }
             const startedIds = data.ids || ids;
             // 渲染批量下载进度面板
             let batchHtml = `<div class="jm-batch-panel">
-                <div class="jm-batch-title">📦 正在下载 ${startedIds.length} 本漫画</div>
+                <div class="jm-batch-title">${icon('download')} 正在下载 ${startedIds.length} 本漫画</div>
                 <div class="jm-batch-list" id="jmBatchList">`;
             startedIds.forEach(id => {
                 batchHtml += `<div class="jm-batch-item" id="batch-${id}">
@@ -2346,9 +2551,10 @@ async function doJmSearch() {
                 </div>`;
             });
             batchHtml += `</div><div class="jm-batch-summary" id="jmBatchSummary">完成 0 / ${startedIds.length}</div></div>`;
-            $('jmResult').innerHTML = batchHtml;
+    $('jmResult').innerHTML = batchHtml;
             startedIds.forEach(id => { addToHistory(id, ''); pollBatchStatus(id, startedIds.length); });
-        } catch (e) { $('jmResult').innerHTML = `<div class="jm-error">网络错误: ${esc(e.message)}</div>`; }
+        } catch (e) {
+    $('jmResult').innerHTML = `<div class="jm-error">网络错误: ${esc(e.message)}</div>`; }
         return;
     }
 
@@ -2356,24 +2562,26 @@ async function doJmSearch() {
     $('jmResult').innerHTML = `<div class="jm-loading"><div class="search-spinner"></div><p>正在搜索 JM${esc(id)}...</p></div>`;
     try {
         const data = await api('search', { q: id });
-        if (data.error) { $('jmResult').innerHTML = `<div class="jm-error">${esc(data.error)}</div>`; return; }
+        if (data.error) {
+    $('jmResult').innerHTML = `<div class="jm-error">${esc(data.error)}</div>`; return; }
         const tags = (data.tags || []).slice(0, 5).map(t => `<span class="search-tag">${esc(t)}</span>`).join('');
-        $('jmResult').innerHTML = `
+    $('jmResult').innerHTML = `
             <div class="jm-result-card">
                 ${data.cover ? `<div class="jm-result-cover-wrap"><img class="jm-result-cover" src="${esc(data.cover)}" alt="封面" loading="lazy"></div>` : ''}
                 <div class="jm-result-name">${esc(data.name)}</div>
                 <div class="jm-result-id">JM${esc(String(data.id))}${data.author ? ' · ' + esc(data.author) : ''}${data.episode_count ? ' · ' + data.episode_count + ' 章' : ''}</div>
                 ${tags ? `<div class="jm-result-tags">${tags}</div>` : ''}
                 ${data.downloaded
-                    ? `<div class="dl-done" style="margin-top:12px">✅ 已下载到本地</div>`
-                    : `<button class="jm-download-btn" data-action="startJmDownload" data-id="${esc(String(data.id))}" data-name="${esc(data.name)}">⬇️ 下载到本地</button>`
+                    ? `<div class="dl-done" style="margin-top:12px">${icon('checkCircle')} 已下载到本地</div>`
+                    : `<button class="jm-download-btn" data-action="startJmDownload" data-id="${esc(String(data.id))}" data-name="${esc(data.name)}">${icon('download')} 下载到本地</button>`
                 }
                 <div class="search-dl-status" id="dl-status-${esc(String(data.id))}"></div>
             </div>
         `;
         pollDownloadStatus(data.id);
         addToHistory(data.id, data.name);
-    } catch (e) { $('jmResult').innerHTML = `<div class="jm-error">网络错误: ${esc(e.message)}</div>`; }
+    } catch (e) {
+    $('jmResult').innerHTML = `<div class="jm-error">网络错误: ${esc(e.message)}</div>`; }
 }
 
 function addToHistory(id, name) {
@@ -2399,7 +2607,7 @@ async function renderDownloadHistory() {
         }
         let html = '';
         if (active.length) {
-            html += `<div class="jm-hist-label">⏳ 正在下载 (${active.length})</div>`;
+            html += `<div class="jm-hist-label">${icon('download')} 正在下载 (${active.length})</div>`;
             html += active.map(t => `<div class="jm-queue-item is-downloading">
                 <span class="queue-id">JM${esc(t.id)}</span>
                 <span class="queue-name">${esc(t.name || '...')}</span>
@@ -2407,22 +2615,22 @@ async function renderDownloadHistory() {
             </div>`).join('');
         }
         if (completed.length) {
-            html += `<div class="jm-hist-label">✅ 下载完成 (${completed.length})</div>`;
+            html += `<div class="jm-hist-label">${icon('checkCircle')} 下载完成 (${completed.length})</div>`;
             html += completed.map(t => {
                 const rel = relTime(t.download_time);
                 return `<div class="jm-queue-item is-done">
                     <span class="queue-id">JM${esc(t.id)}</span>
                     <span class="queue-name">${esc(t.name || '')}</span>
-                    <span class="queue-status">${rel ? `<span style="opacity:.5;font-size:11px;margin-right:6px">${esc(rel)}</span>` : ''}✅ 完成</span>
+                    <span class="queue-status">${rel ? `<span style="opacity:.5;font-size:11px;margin-right:6px">${esc(rel)}</span>` : ''}${icon('checkCircle')} 完成</span>
                 </div>`;
             }).join('');
         }
         if (errors.length) {
-            html += `<div class="jm-hist-label">❌ 下载失败 (${errors.length})</div>`;
+            html += `<div class="jm-hist-label">${icon('xCircle')} 下载失败 (${errors.length})</div>`;
             html += errors.map(t => `<div class="jm-queue-item is-error">
                 <span class="queue-id">JM${esc(t.id)}</span>
                 <span class="queue-name">${esc(t.name || '')}</span>
-                <span class="queue-status">❌ ${esc((t.error || t.progress || '失败').slice(0, 60))}</span>
+                <span class="queue-status">${icon('xCircle')} ${esc((t.error || t.progress || '失败').slice(0, 60))}</span>
             </div>`).join('');
         }
         $('jmQueue').innerHTML = html;
@@ -2430,6 +2638,7 @@ async function renderDownloadHistory() {
         // 如果有活跃任务，恢复结果区的轮询 UI
         if (active.length > 0) {
             const resultEl = $('jmResult');
+            if (!resultEl) return;
             const hasStatus = resultEl.querySelector('.dl-progress, .dl-done, .dl-error, .jm-batch-panel');
             if (!hasStatus) {
                 const ids = active.map(t => t.id);
@@ -2443,7 +2652,7 @@ async function renderDownloadHistory() {
                     if (!state.dlTimers[id]) pollDownloadStatus(id);
                 } else {
                     let batchHtml = `<div class="jm-batch-panel">
-                        <div class="jm-batch-title">📦 下载任务进行中</div>
+                        <div class="jm-batch-title">${icon('download')} 下载任务进行中</div>
                         <div class="jm-batch-list" id="jmBatchList">`;
                     ids.forEach(id => {
                         batchHtml += `<div class="jm-batch-item" id="batch-${id}">
@@ -2458,7 +2667,7 @@ async function renderDownloadHistory() {
             }
         }
     } catch (e) { /* ignore */ }
-    if ($('dlOverlay') && $('dlOverlay').classList.contains('visible')) renderDlStatus();
+    if ($('dlOverlay') && $('dlOverlay').classList.contains('visible')) renderDlStatus(data);
 }
 
 async function startJmDownload(jmId, name) {
@@ -2468,9 +2677,9 @@ async function startJmDownload(jmId, name) {
     if (statusEl) statusEl.innerHTML = `<div class="dl-progress"><div class="dl-spinner"></div> 正在启动...</div>`;
     try {
         const data = await apiPost('download', { ids: [jmId] });
-        if (data.error) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">❌ ${esc(data.error)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
+        if (data.error) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(data.error)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
         pollDownloadStatus(jmId);
-    } catch (e) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">❌ ${esc(e.message)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); }
+    } catch (e) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(e.message)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); }
 }
 
 function pollDownloadStatus(jmId) {
@@ -2488,12 +2697,12 @@ function pollDownloadStatus(jmId) {
             } else if (data.status === 'done') {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
-                if (statusEl) statusEl.innerHTML = `<div class="dl-done">✅ ${data.name ? esc(data.name) : '下载完成'}</div>`;
+                if (statusEl) statusEl.innerHTML = `<div class="dl-done">${icon('checkCircle')} ${data.name ? esc(data.name) : '下载完成'}</div>`;
                 refreshBookshelfIncremental();
             } else if (data.status === 'error') {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
-                if (statusEl) statusEl.innerHTML = `<div class="dl-error">❌ ${esc(data.progress)}</div>`;
+                if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(data.progress)}</div>`;
             }
         } catch (e) { }
     }, 1500);
@@ -2515,14 +2724,14 @@ function pollBatchStatus(jmId, totalCount) {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
                 const name = data.name ? esc(data.name) : `JM${jmId}`;
-                itemEl.querySelector('.jm-batch-status').innerHTML = `✅ ${name} 完成`;
+                itemEl.querySelector('.jm-batch-status').innerHTML = `${icon('checkCircle')} ${name} 完成`;
                 itemEl.classList.add('done');
                 checkBatchComplete(totalCount);
                 refreshBookshelfIncremental();
             } else if (data.status === 'error') {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
-                itemEl.querySelector('.jm-batch-status').innerHTML = `❌ ${esc(data.progress)}`;
+                itemEl.querySelector('.jm-batch-status').innerHTML = `${icon('xCircle')} ${esc(data.progress)}`;
                 itemEl.classList.add('error');
                 checkBatchComplete(totalCount);
             }
@@ -2543,13 +2752,15 @@ function checkBatchComplete(totalCount) {
         const panel = document.querySelector('.jm-batch-panel');
         if (panel) {
             const title = panel.querySelector('.jm-batch-title');
-            if (title) title.textContent = doneCount === totalCount
-                ? `🎉 全部 ${totalCount} 本下载完成！`
-                : `📦 下载完成：${doneCount} 成功，${errorCount} 失败`;
+            if (title) title.innerHTML = doneCount === totalCount
+                ? `全部 ${totalCount} 本下载完成！`
+                : `${icon('download')} 下载完成：${doneCount} 成功，${errorCount} 失败`;
             // 在底部加刷新按钮
-            if (summary) summary.innerHTML += ` <button class="dl-refresh-btn" onclick="location.reload()" style="margin-left:8px">🔄 刷新书架</button>`;
+            if (summary) summary.innerHTML += ` <button class="dl-refresh-btn" onclick="location.reload()" style="margin-left:8px">${icon('refresh')} 刷新书架</button>`;
         }
     }
 }
+
+// ==================== 主题切换（已迁移到 app.js 的深浅双主题） ====================
 
 window.onload = init;

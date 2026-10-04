@@ -1,9 +1,11 @@
-# jmcomic 下载配置
+# jmcomic 下载配置示例
 # 文档: https://github.com/hect0x7/JMComic-Crawler-Python
+#
+# 用法：复制本文件为 option.yml 后按需修改。option.yml 不会被提交到仓库。
 
 # 下载目录
 dir_rule:
-  base_dir: D:/JM
+  base_dir: D:/Comics
   # 默认规则: 根目录 / 章节标题 / 图片文件
   # rule: Bd / Ptitle
 
@@ -20,3 +22,11 @@ download:
   threading:
     image: 4
     photo: 2
+
+# 插件：登录（需要下载功能时填写你自己的 JM 账号）
+# plugins:
+#   after_init:
+#     - plugin: login
+#       kwargs:
+#         username: "你的用户名"
+#         password: "你的密码"

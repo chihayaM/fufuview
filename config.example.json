@@ -1,0 +1,17 @@
+{
+  "_说明": "复制本文件为 config.json 后修改。config.json 不会被提交到仓库。",
+
+  "_libraryPaths": "漫画书库根目录列表，可以有多个；程序按这个列表扫描漫画文件夹",
+  "libraryPaths": [
+    "D:\\JM"
+  ],
+
+  "_password": "访问密码，留空字符串则不启用登录保护",
+  "password": "",
+
+  "_port": "监听端口，默认 8004",
+  "port": 8004,
+
+  "_metaFile": "可选：元数据文件位置，默认是程序同目录下的 comics_meta.json",
+  "metaFile": "D:\\Comics\\comics_meta.json"
+}
