@@ -1251,15 +1251,15 @@ function renderShelfEmpty(failedPaths) {
     let html;
     if (!state.paths.length) {
         html = `<div class="shelf-empty-title">还没有配置漫画目录</div>
-            <div>编辑 <code>config.local.json</code>，把漫画根目录填进 <code>libraryPaths</code>，然后重启程序。</div>`;
+            <div>编辑 <code>config.json</code>，把漫画根目录填进 <code>libraryPaths</code>，然后重启程序。</div>`;
     } else if (failedPaths && failedPaths.length) {
         html = `<div class="shelf-empty-title">书库目录读不到</div>
-            <div>下面这些目录不存在或没有权限，检查路径，或编辑 <code>config.local.json</code> 后重启：</div>
+            <div>下面这些目录不存在或没有权限，检查路径，或编辑 <code>config.json</code> 后重启：</div>
             <ul class="shelf-empty-list">${failedPaths.map(f => `<li>${esc(f.path)} —— ${esc(f.reason)}</li>`).join('')}</ul>`;
     } else {
         html = `<div class="shelf-empty-title">书库还是空的</div>
             <div>把漫画文件夹放进 <code>${esc(state.paths[0])}</code>，每个子文件夹会被当成一本漫画。</div>
-            <div class="shelf-empty-hint">想换个目录？编辑 <code>config.local.json</code> 的 <code>libraryPaths</code> 后重启程序。</div>`;
+            <div class="shelf-empty-hint">想换个目录？编辑 <code>config.json</code> 的 <code>libraryPaths</code> 后重启程序。</div>`;
     }
     el.innerHTML = html;
     el.classList.remove('hidden');

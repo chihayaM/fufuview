@@ -1,8 +1,9 @@
 # ---------- 个人配置（不要提交）----------
-# config.json 是仓库自带的默认值；个人设置写 config.local.json，它永远不会进仓库。
-# option.yml 固定用这个名字（jmcomic 约定），但里面会写 JM 账号，所以也不提交；
-# 缺失时 server.py 会自动生成一份不含账号的模板。
-config.local.json
+# config.json 是唯一的配置文件，里面有书库路径和密码。
+# option.yml 是 JM 下载配置，里面有 JM 账号。
+# 两个都固定用这个名字（option.yml 是 jmcomic 的约定），都不提交；
+# 缺失时 server.py 会自动生成一份不含个人信息的模板，按 README 填即可。
+config.json
 option.yml
 
 # ---------- 运行时数据 ----------

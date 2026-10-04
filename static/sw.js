@@ -1,5 +1,5 @@
 /* fufuView Pro · Service Worker */
-const CACHE_NAME = 'fufuview-v2';
+const CACHE_NAME = 'fufuview-v3';
 const PRECACHE = [
   '/',
   '/static/css/app.css',

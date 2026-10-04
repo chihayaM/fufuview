@@ -17,26 +17,41 @@ from flask import Flask, request, jsonify, send_file, render_template, Response,
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # ========== 本地配置 ==========
-# config.json       仓库自带的默认配置，别在里面写密码
-# config.local.json 个人配置，覆盖 config.json，已被 .gitignore 忽略
+# config.json 是唯一的配置文件，不纳入版本管理（里面有书库路径和密码）。
+# 缺失时按下面的模板自动生成；每个字段的含义见 README。
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
-LOCAL_CONFIG_FILE = os.path.join(BASE_DIR, 'config.local.json')
 
-def _read_config_file(path):
+DEFAULT_CONFIG = {
+    "_说明": "fufuView Pro 配置。改完要重启程序才生效。",
+    "_libraryPaths": "漫画书库根目录列表，可以写多个；每个子文件夹会被当成一本漫画。留空则用程序同目录下的 library/。",
+    "libraryPaths": [],
+    "_password": "访问密码，留空则不启用登录。",
+    "password": "",
+    "_port": "监听端口。",
+    "port": 8004,
+}
+
+def ensure_config_file():
+    if os.path.exists(CONFIG_FILE):
+        return True
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"⚠️ {os.path.basename(path)} 解析失败，已跳过: {e}")
-        return {}
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+        print("已生成默认的 config.json（使用默认书库 library/）")
+        return True
+    except OSError as e:
+        print(f"⚠️ 无法生成 config.json: {e}")
+        return False
 
 def load_config():
-    base = _read_config_file(CONFIG_FILE) if os.path.exists(CONFIG_FILE) else {}
-    local = _read_config_file(LOCAL_CONFIG_FILE) if os.path.exists(LOCAL_CONFIG_FILE) else {}
-    if base.get('password'):
-        print("⚠️ config.json 里填了密码。它是仓库跟踪的文件，容易被误提交，")
-        print("   建议把密码移到 config.local.json（该文件不会被提交）。")
-    return {**base, **local}
+    ensure_config_file()
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ config.json 解析失败，改用默认配置: {e}")
+        return {}
 
 _CONFIG = load_config()
 
@@ -44,7 +59,7 @@ PORT = int(_CONFIG.get('port', 8004))
 META_FILE = _CONFIG.get('metaFile') or os.path.join(BASE_DIR, 'comics_meta.json')
 
 # ========== 运行配置 ==========
-# 漫画书库根目录列表，在 config.json / config.local.json 的 libraryPaths 里配置
+# 漫画书库根目录列表，在 config.json 的 libraryPaths 里配置
 LIBRARY_PATHS = [os.path.abspath(os.path.expanduser(p))
                  for p in (_CONFIG.get('libraryPaths') or []) if p]
 
@@ -64,11 +79,11 @@ else:
 PASSWORD = _CONFIG.get('password', '')
 
 # ========== JM 下载配置 ==========
-# 固定用 option.yml 这个名字 —— jmcomic 约定的就是它，独立调用 jmcomic 时读的也是它。
+# 固定用 option.yml 这个名字 —— jmcomic 约定的就是它，单独跑 jmcomic 时读的也是它。
 # 里面会写 JM 账号，所以不纳入版本管理；缺失时按下面模板自动生成。
 OPTION_FILE = os.path.join(BASE_DIR, 'option.yml')
 
-DEFAULT_OPTION_YML = """# jmcomic 下载配置（程序自动生成，不会被提交到仓库）
+DEFAULT_OPTION_YML = """# jmcomic 下载配置（程序自动生成的模板）
 # 文档: https://github.com/hect0x7/JMComic-Crawler-Python
 
 # 下载目录
@@ -1169,7 +1184,7 @@ if __name__ == '__main__':
         print(f"   书库: {p} {mark}{exists}")
     if USING_DEFAULT_LIBRARY:
         print(f"   还没有配置漫画目录，已自动使用 {LIBRARY_PATHS[0]}")
-        print(f"   把漫画文件夹放进去即可；或编辑 config.local.json 添加其他目录")
+        print(f"   把漫画文件夹放进去即可；或编辑 config.json 的 libraryPaths 添加其他目录")
     _open_app_window(f'http://{local_ip}:{PORT}')
 
     # --- jmcomic 加载结果异步输出 ---
