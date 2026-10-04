@@ -16,6 +16,14 @@ from flask import Flask, request, jsonify, send_file, render_template, Response,
 # ========== 基础路径 ==========
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
+# 统一工作目录到程序所在目录。
+# option.yml 里的相对路径（默认的 ./library）是按 CWD 解析的，如果不切换，
+# 从别的目录启动时漫画会下载到 CWD/library，而书架扫的是程序目录/library，对不上。
+try:
+    os.chdir(BASE_DIR)
+except OSError as e:
+    print(f"⚠️ 无法切换工作目录到 {BASE_DIR}: {e}")
+
 # ========== 本地配置 ==========
 # config.json 是唯一的配置文件，不纳入版本管理（里面有书库路径和密码）。
 # 缺失时按下面的模板自动生成；每个字段的含义见 README。
