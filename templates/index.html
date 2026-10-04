@@ -70,7 +70,7 @@
         <button class="btn btn-ghost btn-icon menu-btn" data-action="toggleSidebar" id="menuBtn"><span data-icon="menu"></span></button>
         <div class="top-pager" id="topPager"></div>
         <span class="spacer"></span>
-        <button class="btn btn-outline btn-sm" data-action="openJmPanel"><span class="btn-ic" data-icon="download"></span>下载</button>
+        <button class="btn btn-outline btn-sm btn-download" data-action="openJmPanel"><span class="btn-ic" data-icon="download"></span>下载</button>
         <button class="btn btn-ghost btn-icon" data-action="randomComic" title="随机漫画"><span data-icon="shuffle"></span></button>
         <button class="btn btn-ghost btn-icon fs-btn" data-action="toggleFullscreen" title="全屏模式"><span data-icon="eye"></span></button>
         <button class="btn btn-ghost btn-icon" onclick="location.reload()" title="刷新"><span data-icon="refresh"></span></button>
@@ -158,6 +158,7 @@
         </div>
         <div class="jm-result" id="jmResult"></div>
         <div class="jm-queue" id="jmQueue"></div>
+        <div class="jm-log hidden" id="jmLog"></div>
         <div class="jm-history" id="jmHistory"></div>
       </div>
     </div>
@@ -288,18 +289,8 @@
     });
     // 初始化主题开关图标
     initThemeToggles();
-    // 登录图标
-    document.getElementById('loginIcon').innerHTML = icon('lock');
-    // 品牌标记
-    document.getElementById('brandMark').innerHTML = icon('book');
     // 菜单按钮
     document.getElementById('menuBtn').innerHTML = icon('menu');
-    // 注册 Service Worker（PWA 离线缓存 + 安装提示）
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/sw.js').catch(() => {});
-      });
-    }
   </script>
 </body>
 </html>

@@ -160,7 +160,6 @@ const state = {
     dlTimers: {},
     filterText: '',
     sortMode: 0,
-    activeTag: '',
     activeTags: new Set(),   // 多选 tag
     activePaths: new Set(),  // 多选书库路径
     allTags: {},
@@ -171,7 +170,6 @@ const state = {
     jmHistory: [],
     activeJmDownloads: new Set(),  // 跟踪活跃的 JM 下载任务（跨面板开关保持）
     longPressFired: false,
-    menuJustClosed: false,
     hoverPreview: localStorage.getItem('hoverPreviewOff') !== '1',  // 鼠标悬浮封面预览开关（记忆用户选择）
     readerOpen: false,
     appFullscreen: false,
@@ -179,7 +177,6 @@ const state = {
     allFiltered: [],       // 合并后的全部过滤结果
     displayedCount: 0,     // 当前已渲染的数量
     isLoadingMore: false,  // 防止并发加载
-    currentPage: 0,        // 当前可视页码（基于滚动位置计算）
 };
 
 const PER_PAGE = 60;       // 每次加载数量
@@ -266,10 +263,8 @@ async function init() {
             case 'doJmSearch': doJmSearch(); break;
             case 'jmHistSearch': $('jmInput').value = a1; doJmSearch(); break;
             case 'startJmDownload': startJmDownload(el.dataset.id, el.dataset.name); break;
-            case 'toggleDlPreview': toggleDlPreview(); break;
             case 'toggleHoverPreview': toggleHoverPreview(); break;
-            case 'openDlStatus': openDlStatus(); break;
-                        case 'sortByLastRead': sortByLastRead(); break;
+            case 'sortByLastRead': sortByLastRead(); break;
             case 'closeDlStatus': closeDlStatus(); break;
             // 阅读器
             case 'closeReader': closeReader(); break;
@@ -280,7 +275,6 @@ async function init() {
             case 'closeRandom': closeRandom(); break;
             case 'openRandomComic': openRandomComic(el.dataset.idx == null ? 0 : parseInt(el.dataset.idx)); break;
             case 'rerollRandom': rerollRandom(); break;
-            case 'cleanDelComics': cleanDelComics(); break;
             case 'resetAllProgress': resetAllProgress(); break;
             // 回收站
             case 'openRecycleBin': openRecycleBin(); break;
@@ -383,6 +377,13 @@ async function initApp() {
         if (action === 'moveTagToCatSelect') moveTagToCat(a1, el.value);
     });
 
+    // 正在输入框/文本域里打字时，不应该触发全局快捷键
+    function isTypingTarget(t) {
+        if (!t || !t.tagName) return false;
+        const tag = t.tagName.toLowerCase();
+        return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable === true;
+    }
+
     // ESC 关闭弹窗
     document.addEventListener('keydown', e => {
         if (!$('reader').classList.contains('hidden')) {
@@ -390,7 +391,7 @@ async function initApp() {
             if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'a' || e.key === 'A') { e.preventDefault(); turnPage(state.rtl ? 1 : -1); return; }
             if (e.key === 'Escape' || e.key === 'q' || e.key === 'Q') { closeReader(); return; }
         }
-        if (e.key === 'e' || e.key === 'E') { toggleAppFullscreen(); return; }
+        if ((e.key === 'e' || e.key === 'E') && !isTypingTarget(e.target)) { toggleAppFullscreen(); return; }
         if (e.key === 'Escape') {
             if (!$('contextMenu').classList.contains('hidden')) { $('contextMenu').classList.add('hidden'); return; }
             if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
@@ -473,23 +474,38 @@ function refreshBookshelfIncremental() {
     // 增量刷新：重新加载所有书库数据，保持当前滚动位置和筛选状态
     const bookshelf = $('bookshelf');
     const savedScrollTop = bookshelf.scrollTop;
-    
+
     Promise.all(
         state.paths.map((p, i) => api('comics', { path: p }).then(res => ({ i, comics: res.comics || [] })))
     ).then(results => {
         results.forEach(r => { state.comics[r.i] = r.comics; });
-        state.allFiltered = [];
-        state.displayedCount = 0;
-        const grid = $('grid-all');
-        grid.innerHTML = '';
-        loadMoreItems();
+        // 之前只回填一页就恢复 scrollTop，滚过两页以上的话位置会被顶回顶部
+        const keep = Math.max(state.displayedCount, PER_PAGE);
+        rebuildGrid(keep);
         // 恢复滚动位置
         bookshelf.scrollTop = savedScrollTop;
         loadStats();
+        // 刚下载完的书要能进随机池，否则随机阅读要等下次刷新页面才认得到
+        state.random.allComics = [];
         // 下载完成后端会动标签分类（作者归入「艺术家」），顺手取一次最新的，
         // 免得本地这份过期副本在下次保存时把它覆盖掉。
         loadTagConfig().then(renderTagBar);
     }).catch(() => {});
+}
+
+// 清空 grid 并重新渲染到 count 条（保留当前筛选/排序）
+function rebuildGrid(count) {
+    CoverManager.reset();
+    state.allFiltered = [];
+    state.displayedCount = 0;
+    $('grid-all').innerHTML = '';
+    const all = getAllFiltered();
+    const end = Math.min(count, all.length);
+    if (end > 0) {
+        renderMoreItems(all.slice(0, end), 0);
+        state.displayedCount = end;
+    }
+    return all;
 }
 
 function pollDownloadStatusGlobal(jmId) {
@@ -514,7 +530,6 @@ function setupBookshelfDelegation() {
 
     // 用事件委托统一处理点击、右键、长按
     let longTimer = null;
-    let longTarget = null;
 
     bookshelf.addEventListener('touchstart', e => {
         const card = e.target.closest('.comic-card');
@@ -522,7 +537,6 @@ function setupBookshelfDelegation() {
         // 菜单打开时不触发长按
         if (!$('contextMenu').classList.contains('hidden')) return;
         state.longPressFired = false;
-        longTarget = card;
         longTimer = setTimeout(() => {
             state.longPressFired = true;
             hidePreview();
@@ -531,7 +545,7 @@ function setupBookshelfDelegation() {
         }, 500);
     }, { passive: true });
 
-    const cancelLong = () => { clearTimeout(longTimer); longTarget = null; };
+    const cancelLong = () => { clearTimeout(longTimer); };
     bookshelf.addEventListener('touchend', cancelLong);
     bookshelf.addEventListener('touchmove', cancelLong);
     bookshelf.addEventListener('touchcancel', cancelLong);
@@ -633,10 +647,13 @@ function updateSidebarStats(stats) {
     if (!dlIndicator) {
         dlIndicator = document.createElement('div');
         dlIndicator.id = 'sidebarDlIndicator';
-        dlIndicator.style.cssText = 'padding:8px 16px;margin:0 8px 4px;border-radius:8px;font-size:11px;font-weight:600;display:none;align-items:center;gap:6px;background:rgba(91,106,191,0.12);color:#5b6abf;border:1px solid rgba(91,106,191,0.2);';
-        const sidebar = $('sidebar');
-        const firstSection = sidebar.querySelector('.sidebar-section');
-        if (firstSection) sidebar.insertBefore(dlIndicator, firstSection);
+        dlIndicator.style.cssText = 'padding:8px 16px;margin:0 8px 4px;border-radius:8px;font-size:11px;font-weight:600;display:none;align-items:center;gap:6px;background:rgba(91,106,191,0.12);color:#5b6abf;border:1px solid rgba(91,106,191,0.2);cursor:pointer;';
+        dlIndicator.title = '查看下载状态';
+        dlIndicator.addEventListener('click', openDlStatus);
+        // 之前找的是 .sidebar-section，这个类在 HTML 里根本不存在，
+        // 导致指示器建好了却从没插进 DOM。挂在统计栏下面。
+        const anchor = $('sidebarStats');
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(dlIndicator, anchor.nextSibling);
     }
     const activeDlCount = state.activeJmDownloads.size;
     if (activeDlCount > 0) {
@@ -719,7 +736,6 @@ function renderHomepageTags() {
 
 function clearAllHomepageTags() {
     state.activeTags.clear();
-    state.activeTag = '';
     renderHomepageTags();
     renderActiveTags();
     updateTagPickerBtn();
@@ -866,7 +882,7 @@ function renderTagPicker() {
     let html = favSection;
     const renderSection = (catName, items, id) => {
         if (!items.length) return '';
-        return `<div class="tagpicker-section" id="tp-${id}">
+        return `<div class="tagpicker-section" id="tp-${esc(id)}">
             <div class="tagpicker-section-title">${id === '__uncat__' ? '未分类' : esc(catName)}</div>
             <div class="tagpicker-grid">${items.map(i => {
                 const sel = state.activeTags.has(i.tag);
@@ -891,13 +907,11 @@ function renderTagPicker() {
 function tagPickerToggle(tag) {
     if (state.activeTags.has(tag)) state.activeTags.delete(tag);
     else state.activeTags.add(tag);
-    state.activeTag = state.activeTags.size === 1 ? [...state.activeTags][0] : '';
     renderTagPicker();
 }
 
 function tagPickerClear() {
     state.activeTags.clear();
-    state.activeTag = '';
     renderTagPicker();
 }
 
@@ -911,38 +925,6 @@ function tagPickerScrollTo(id, btn) {
     }
     const el = document.getElementById('tp-' + id);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-// ==================== 清理待删除漫画 ====================
-
-// showConfirm 已由 app.js 提供
-
-async function cleanDelComics() {
-    const delList = getDelComics();
-    if (!delList.length) return;
-
-    showConfirm(
-        icon('trash'),
-        `清理 ${delList.length} 本待删除漫画？`,
-        '文件将被永久删除，无法恢复。',
-        `确认删除 ${delList.length} 本`,
-        async () => {
-            const res = await apiPost('clean-del', {});
-            if (res.ok) {
-                delList.forEach(item => {
-                    const list = state.comics[item.pIdx] || [];
-                    const idx = list.findIndex(c => c.name === item.name);
-                    if (idx >= 0) list.splice(idx, 1);
-                });
-                state.random.allComics = [];
-                applyFilters();
-                loadStats();
-                showConfirm(icon('checkCircle'), `已删除 ${res.deleted} 本漫画`, '文件已永久删除', '好的', () => {});
-            } else {
-                showConfirm(icon('xCircle'), '清理失败', res.error || '未知错误', '关闭', () => {});
-            }
-        }
-    );
 }
 
 // ==================== 重置阅读进度 ====================
@@ -1143,7 +1125,6 @@ function toggleTagFilter(tag) {
     } else {
         state.activeTags.add(tag);
     }
-    state.activeTag = state.activeTags.size === 1 ? [...state.activeTags][0] : '';
     renderHomepageTags();
     renderActiveTags();
     updateTagPickerBtn();
@@ -1269,15 +1250,16 @@ function renderShelfEmpty(failedPaths) {
 }
 
 function applyFilters(scrollToStart) {
-    state.allFiltered = [];
-    state.displayedCount = 0;
-    state.currentPage = 0;
-    const grid = $('grid-all');
-    grid.innerHTML = '';
-    loadMoreItems();
+    const bookshelf = $('bookshelf');
+    const savedScrollTop = bookshelf.scrollTop;
+    // 只有筛选条件真的变了才回到第一页；applyFilters(false) 是「原地重排」，
+    // 得把已渲染的条数还回去，不然滚动位置会被 clamp 到顶部。
+    const keep = scrollToStart === false ? Math.max(state.displayedCount, PER_PAGE) : PER_PAGE;
+    rebuildGrid(keep);
     refreshPager();
     if (state.allFiltered.length) hideShelfEmpty();
     if (scrollToStart !== false) scrollToTop();
+    else bookshelf.scrollTop = savedScrollTop;
 }
 
 // ==================== 无限滚动 + 页码追踪 ====================
@@ -1344,7 +1326,6 @@ function refreshPager() {
         }
     }
     const currentPage = Math.floor(firstVisibleIdx / PER_PAGE);
-    state.currentPage = currentPage;
 
     // 生成页码按钮
     let pageButtons = '';
@@ -1390,7 +1371,7 @@ function goToPage(page) {
     // 如果目标页尚未渲染，先加载到那一页
     if (targetIdx >= state.displayedCount) {
         renderMoreItems(all.slice(state.displayedCount, targetIdx + PER_PAGE), state.displayedCount);
-        state.displayedCount = targetIdx + PER_PAGE;
+        state.displayedCount = Math.min(targetIdx + PER_PAGE, all.length);
     }
 
     // 滚动到目标卡片位置
@@ -1400,7 +1381,6 @@ function goToPage(page) {
     }
 
     // 立即更新页码高亮
-    state.currentPage = page;
     refreshPager();
 }
 
@@ -1598,6 +1578,9 @@ async function ctxToggleDel() {
         if (card) card.classList.toggle('is-del', res.tags.includes('del'));
         showToast(hasDel ? '已取消待删除' : '已标记待删除', 'success');
         loadStats();
+        // 正常视图会过滤掉 del 的漫画，标完要重排才算数
+        invalidateCache();
+        applyFilters(false);
     }
 }
 
@@ -1685,6 +1668,9 @@ async function detailToggleFav() {
         if (card) card.classList.toggle('is-fav', res.fav);
         renderDetailActions(comic);
         loadStats();
+        invalidateCache();
+        // 正在按「收藏」筛选时，取消收藏的卡片应该当场消失
+        if (state.activeTags.has(FAV_TAG)) applyFilters(false);
     }
 }
 
@@ -1705,6 +1691,9 @@ async function detailToggleDel() {
         renderTagList(res.tags);
         renderTagSuggestions(res.tags);
         loadStats();
+        // 正常视图会过滤掉 del 的漫画，标完要重排才算数（详情面板保持打开）
+        invalidateCache();
+        applyFilters(false);
     }
 }
 
@@ -1973,7 +1962,7 @@ function renderTagManager() {
 
     const renderCat = (catName, items, id, ic) => {
         if (!items.length) return '';
-        let h = `<div class="tagmgr-cat" id="tm-${id}">
+        let h = `<div class="tagmgr-cat" id="tm-${esc(id)}">
             <div class="tagmgr-cat-header">
                 <span class="tagmgr-cat-name">${ic || icon('folder')} ${id === '__uncat__' ? '未分类' : esc(catName)}</span>
                 <span class="tagmgr-cat-count">${items.length}</span>
@@ -2086,7 +2075,6 @@ function filterByTagFromMgr(tag) {
     closeTagManager();
     state.activeTags.clear();
     state.activeTags.add(tag);
-    state.activeTag = tag;
     renderHomepageTags();
     renderActiveTags();
     updateTagPickerBtn();
@@ -2100,7 +2088,16 @@ function moveTagToCat(tag, cat) {
         cat = name.trim();
         if (!state.tagCategories[cat]) state.tagCategories[cat] = [];
     }
-    if (!cat) return;
+    if (!cat) {
+        // 下拉选「未分类」（value 为空）：从所有分类里移出去，不要建一个空名分类
+        for (const c of Object.keys(state.tagCategories)) {
+            state.tagCategories[c] = state.tagCategories[c].filter(t => t !== tag);
+            if (!state.tagCategories[c].length) delete state.tagCategories[c];
+        }
+        saveTagConfig();
+        renderTagManager();
+        return;
+    }
     for (const [c, tags] of Object.entries(state.tagCategories)) {
         state.tagCategories[c] = tags.filter(t => t !== tag);
         if (!state.tagCategories[c].length) delete state.tagCategories[c];
@@ -2561,6 +2558,53 @@ async function renderDlStatus(cachedData) {
     }
 }
 
+// ==================== 实时下载日志（SSE） ====================
+// 这里只负责「日志流」一件事。下载状态/进度/角标仍然走轮询：
+// 轮询是自愈的（每次重读一遍服务端真相），SSE 断线不重放，
+// 所以两者分工不重叠，谁也别替谁。
+let _logSource = null;
+const LOG_MAX_LINES = 200;
+
+function openDownloadLog() {
+    if (_logSource || !('EventSource' in window)) return;
+    _logSource = new EventSource('/api/download/stream');
+    _logSource.addEventListener('connected', () => appendLogLine('', '已连接下载日志流', 'sys'));
+    _logSource.addEventListener('log', e => {
+        let d;
+        try { d = JSON.parse(e.data); } catch (_) { return; }
+        appendLogLine(d.id ? 'JM' + d.id : '', d.msg || '', d.level || '');
+    });
+    // EventSource 自己会重连；只有服务端彻底不可用（CLOSED）才收摊并提示
+    _logSource.onerror = () => {
+        if (_logSource && _logSource.readyState === EventSource.CLOSED) {
+            appendLogLine('', '日志流已断开', 'error');
+            closeDownloadLog();
+        }
+    };
+}
+
+function closeDownloadLog() {
+    if (_logSource) { _logSource.close(); _logSource = null; }
+}
+
+function appendLogLine(idLabel, msg, level) {
+    const box = $('jmLog');
+    if (!box) return;
+    box.classList.remove('hidden');
+    const t = new Date();
+    const hhmmss = [t.getHours(), t.getMinutes(), t.getSeconds()]
+        .map(n => String(n).padStart(2, '0')).join(':');
+    const cls = level === 'success' ? ' is-success' : level === 'error' ? ' is-error' : level === 'sys' ? ' jm-log-sys' : '';
+    const div = document.createElement('div');
+    div.className = 'jm-log-line' + cls;
+    div.innerHTML = `<span class="lg-time">${hhmmss}</span>`
+        + (idLabel ? `<span class="lg-id">${esc(idLabel)}</span>` : '')
+        + `<span>${esc(msg)}</span>`;
+    box.appendChild(div);
+    while (box.children.length > LOG_MAX_LINES) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+}
+
 // ==================== JM 下载器 ====================
 
 function openJmPanel() {
@@ -2572,11 +2616,13 @@ function openJmPanel() {
     requestAnimationFrame(() => { $('jmOverlay').classList.add('visible'); $('jmPanel').classList.add('animate-in'); });
     renderJmHistory();
     renderDownloadHistory();
+    openDownloadLog();
     $('jmInput').focus();
 }
 
 function closeJmPanel() {
     // 不再清除下载定时器，保持后台轮询
+    closeDownloadLog();
     $('jmOverlay').classList.remove('visible');
     setTimeout(() => { $('jmOverlay').classList.add('hidden'); $('jmPanel').classList.remove('animate-in'); }, 300);
 }
@@ -2677,8 +2723,10 @@ function renderJmHistory() {
 }
 
 async function renderDownloadHistory() {
+    // 声明在 try 外面：下面的 catch 之后还要用它刷新下载状态面板
+    let data = null;
     try {
-        const data = await api('download/history');
+        data = await api('download/history');
         const { active = [], completed = [], errors = [], total = 0 } = data;
         if (!total) {
             $('jmQueue').innerHTML = '';
@@ -2746,7 +2794,7 @@ async function renderDownloadHistory() {
             }
         }
     } catch (e) { /* ignore */ }
-    if ($('dlOverlay') && $('dlOverlay').classList.contains('visible')) renderDlStatus(data);
+    if (data && $('dlOverlay') && $('dlOverlay').classList.contains('visible')) renderDlStatus(data);
 }
 
 async function startJmDownload(jmId, name) {
@@ -2769,7 +2817,10 @@ function pollDownloadStatus(jmId) {
             const data = await api('download/status', { id: jmId });
             const statusEl = $(`dl-status-${jmId}`);
             // 如果面板关闭且 DOM 元素不存在，停止轮询（交给全局轮询）
-            if (!statusEl && !$('jmOverlay').classList.contains('visible') && !state.activeJmDownloads.has(jmId)) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; return; }
+            // 显示这个任务的元素没了（面板关了/重渲染过），停掉细粒度轮询，
+            // 交给全局轮询继续收尾——不能在这里就把 jmId 从 activeJmDownloads 里删掉，
+            // 否则下载还没结束，角标就先掉数字了。
+            if (!statusEl && !$('jmOverlay').classList.contains('visible')) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; pollDownloadStatusGlobal(jmId); return; }
             if (data.status === 'none') { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
             if (data.status === 'pending' || data.status === 'downloading') {
                 if (statusEl) statusEl.innerHTML = `<div class="dl-progress"><div class="dl-spinner"></div>${data.name ? `<span class="dl-name">${esc(data.name)}</span>` : ''}<span>${esc(data.progress)}</span></div>`;
@@ -2794,7 +2845,7 @@ function pollBatchStatus(jmId, totalCount) {
         try {
             const data = await api('download/status', { id: jmId });
             const itemEl = $(`batch-${jmId}`);
-            if (!itemEl) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
+            if (!itemEl) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; pollDownloadStatusGlobal(jmId); return; }
             if (data.status === 'none') { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
             if (data.status === 'pending' || data.status === 'downloading') {
                 const name = data.name ? esc(data.name) : `JM${jmId}`;

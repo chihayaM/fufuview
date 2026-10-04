@@ -151,6 +151,12 @@ def _valid_name(name):
     """校验文件/文件夹名合法性"""
     if not name or '..' in name or '/' in name or '\\' in name:
         return False
+    # NUL 会让 os.path.isfile/stat 抛 ValueError（file=%00 那种请求）
+    if '\x00' in name:
+        return False
+    # 全是点/空格的名字会把 normpath 折回父目录（comic=. 会列出书库根）
+    if not name.strip(' .'):
+        return False
     if any(c in _WIN_FORBID_CHARS for c in name):
         return False
     return True
@@ -250,6 +256,7 @@ def _periodic_cleanup():
         try:
             cleanup_sessions()
             cleanup_login_attempts()
+            cleanup_download_tasks()
         except Exception as e:
             print(f"⚠️ 定期清理异常: {e}")
 
@@ -275,16 +282,13 @@ def _require_auth():
 
 # ========== 漫画元数据 ==========
 _meta_lock = threading.RLock()
-_meta_mtime = 0
 _comics_cache = {}
 _comics_lock = threading.Lock()
 
 def load_meta():
-    global _meta_mtime
     with _meta_lock:
         if os.path.exists(META_FILE):
             try:
-                _meta_mtime = os.path.getmtime(META_FILE)
                 with open(META_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except:
@@ -292,7 +296,6 @@ def load_meta():
     return {}
 
 def save_meta(meta):
-    global _meta_mtime
     tmp = META_FILE + '.tmp.' + str(os.getpid()) + '.' + str(threading.get_ident())
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False, indent=1)
@@ -307,7 +310,6 @@ def save_meta(meta):
                 if retry == 2:
                     raise
                 time.sleep(0.1 * (retry + 1))
-        _meta_mtime = os.path.getmtime(META_FILE)
 
 def comic_key(path, name):
     return f"{path}||{name}"
@@ -386,6 +388,26 @@ def fetch_album_detail(client, jm_id):
 
 download_tasks = {}
 dl_lock = threading.Lock()
+# 已结束的下载任务只留 7 天、最多 200 条，否则 download_tasks 会一直涨
+DOWNLOAD_TASK_TTL = 7 * 24 * 3600
+MAX_FINISHED_TASKS = 200
+
+def cleanup_download_tasks():
+    """清理已结束（done/error）的下载任务记录"""
+    now = time.time()
+    with dl_lock:
+        for jid, t in list(download_tasks.items()):
+            if t.get('status') not in ('done', 'error'):
+                continue
+            ts = t.get('finish_time') or t.get('download_time') or 0
+            if ts and now - ts > DOWNLOAD_TASK_TTL:
+                download_tasks.pop(jid, None)
+        finished = [(jid, t) for jid, t in download_tasks.items()
+                    if t.get('status') in ('done', 'error')]
+        if len(finished) > MAX_FINISHED_TASKS:
+            finished.sort(key=lambda kv: kv[1].get('finish_time') or kv[1].get('download_time') or 0)
+            for jid, _ in finished[:-MAX_FINISHED_TASKS]:
+                download_tasks.pop(jid, None)
 
 def _sync_jm_tags(jm_id, album, download_dir=None, total_photos=0):
     """下载完成后同步 JM 标签到 comics_meta.json"""
@@ -454,11 +476,22 @@ def _sync_jm_tags(jm_id, album, download_dir=None, total_photos=0):
                         found_folder, found_lib = folder_name, lib_path
                         break
             if not found_folder and album_name_san:
+                # 兜底：双向子串匹配。这里取「重叠最多的那个」而不是第一个命中的，
+                # 否则下载「花火」时库里已有的「花」会先被命中，标签和作者就写到别人头上了。
+                # 同时要求重叠片段至少 2 个字，挡掉单字乱配。
+                best_folder, best_score = None, 0
                 for folder_name in folder_names:
                     folder_san = fix_windir_name(folder_name)
-                    if album_name_san in folder_san or folder_san in album_name_san:
-                        found_folder, found_lib = folder_name, lib_path
-                        break
+                    if album_name_san in folder_san:
+                        score = len(album_name_san)
+                    elif folder_san in album_name_san:
+                        score = len(folder_san)
+                    else:
+                        continue
+                    if score >= 2 and score > best_score:
+                        best_folder, best_score = folder_name, score
+                if best_folder:
+                    found_folder, found_lib = best_folder, lib_path
             if found_folder:
                 break
         except Exception:
@@ -802,6 +835,10 @@ def api_search():
                 for k, v in list(_lookup_cache.items()):
                     if now - v[0] >= LOOKUP_TTL:
                         _lookup_cache.pop(k, None)
+                # 都还没过期时按最早写入的淘汰，保证上限是硬的
+                if len(_lookup_cache) > 200:
+                    for k, _ in sorted(_lookup_cache.items(), key=lambda kv: kv[1][0])[:len(_lookup_cache) - 200]:
+                        _lookup_cache.pop(k, None)
             _lookup_cache[pure_id] = (time.time(), info)
 
     # 是否已下载每次现算：本地目录随时会变，不能跟着缓存走
@@ -1004,6 +1041,10 @@ def api_meta():
     name = data.get('name', '')
     if not path or not name:
         return jsonify({"error": "缺少 path 或 name"}), 400
+    # path/name 会成为 comics_meta.json 的 key，而 /api/clean-del 会拿这个 key 去 rmtree，
+    # 所以这里必须按「书库路径 + 合法文件名」校验，不能只判空。
+    if not _guard_dangerous_path(path) or not _valid_name(name):
+        return jsonify({"error": "非法 path 或 name"}), 400
     key = comic_key(path, name)
     with _meta_lock:
         meta = load_meta()
@@ -1024,7 +1065,11 @@ def api_meta():
                 tags.remove(data['removeTag'])
             meta[key]['tags'] = tags
         if 'lastRead' in data:
-            meta[key]['lastRead'] = int(data['lastRead'])
+            try:
+                last_read = int(data['lastRead'])
+            except (TypeError, ValueError):
+                return jsonify({"error": "lastRead 必须是数字"}), 400
+            meta[key]['lastRead'] = last_read
             read_entries = [(k, v.get('lastRead', 0)) for k, v in meta.items()
                             if k != '__tag_config__' and isinstance(v, dict) and v.get('lastRead', 0) > 0]
             if len(read_entries) > 20:
@@ -1032,7 +1077,11 @@ def api_meta():
                 for old_key, _ in read_entries[20:]:
                     meta[old_key].pop('lastRead', None)
         if 'readProgress' in data:
-            meta[key]['readProgress'] = int(data['readProgress'])
+            try:
+                read_progress = int(data['readProgress'])
+            except (TypeError, ValueError):
+                return jsonify({"error": "readProgress 必须是数字"}), 400
+            meta[key]['readProgress'] = read_progress
         save_meta(meta)
     return jsonify({"ok": True, **meta[key]})
 
@@ -1104,7 +1153,15 @@ def api_clean_del():
         if 'del' not in val.get('tags', []): continue
         if '||' not in key: continue
         path, name = key.split('||', 1)
-        comic_path = os.path.join(path, name)
+        # 这个 key 未必是程序自己写的（/api/meta 曾能写入任意值），
+        # 而下面就是 shutil.rmtree，绝不能拿着未校验的字符串去删。
+        if not _guard_dangerous_path(path) or not _valid_name(name):
+            errors.append(f"{name}: 不在书库内，已跳过")
+            continue
+        comic_path = safe_path(path, name)
+        if not comic_path:
+            errors.append(f"{name}: 路径不合法，已跳过")
+            continue
         try:
             if os.path.exists(comic_path):
                 shutil.rmtree(comic_path)
@@ -1231,13 +1288,54 @@ def _open_app_window(url):
             print(f"⚠️ 应用窗口打开失败，退回默认浏览器: {e}")
     webbrowser.open(url)
 
+def _disable_quick_edit():
+    """关掉控制台的「快速编辑模式」（仅 Windows）
+
+    开着快速编辑时，在窗口里点一下鼠标就会进入「选择」状态，此后所有写往
+    stdout 的输出都被控制台阻塞住，进程看起来像卡死了，按回车/ESC 才恢复。
+    这里只改当前这个窗口的控制台模式，不动用户的系统设置。
+
+    注意：清 ENABLE_QUICK_EDIT_MODE 的同时必须置上 ENABLE_EXTENDED_FLAGS，
+    否则清除动作会被控制台忽略，等于白改。
+    """
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        # 不声明 restype 的话句柄会按 c_int 截断，64 位下可能拿到错的句柄
+        k32.GetStdHandle.restype = wintypes.HANDLE
+        k32.GetStdHandle.argtypes = [wintypes.DWORD]
+        k32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+        h = k32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        if h is None or h == ctypes.c_void_p(-1).value:
+            return  # 没有控制台（输入被重定向 / 当服务跑），不用管
+        mode = wintypes.DWORD()
+        if not k32.GetConsoleMode(h, ctypes.byref(mode)):
+            return
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        k32.SetConsoleMode(h, (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS)
+    except Exception:
+        pass  # 拿不到控制台就算了，不该因此起不来
+
 # ========== 启动 ==========
 if __name__ == '__main__':
     import socket as _socket
     local_ip = get_local_ip()
 
+    # 关掉快速编辑，免得在窗口里误点一下进程就被卡住
+    _disable_quick_edit()
+
     # --- 并发启动: jmcomic 加载 + Flask 服务 ---
     jm_result = {}
+
+    # option.yml 缺失时就在这里生成模板。不能等 get_jmcomic()：
+    # 那条路径要先 import jmcomic 成功，没装 jmcomic 的用户就永远拿不到这份文件。
+    ensure_option_file()
 
     def _init_jmcomic():
         try:
