@@ -486,6 +486,9 @@ function refreshBookshelfIncremental() {
         // 恢复滚动位置
         bookshelf.scrollTop = savedScrollTop;
         loadStats();
+        // 下载完成后端会动标签分类（作者归入「艺术家」），顺手取一次最新的，
+        // 免得本地这份过期副本在下次保存时把它覆盖掉。
+        loadTagConfig().then(renderTagBar);
     }).catch(() => {});
 }
 
@@ -1869,7 +1872,7 @@ async function removeTag(tag) {
 
 // ==================== 标签管理器 ====================
 
-function openTagManager() {
+async function openTagManager() {
     if (state.isMobile) closeSidebar();
     $('tagMgrOverlay').classList.remove('hidden');
     $('tagMgrSearch').value = '';
@@ -1878,6 +1881,12 @@ function openTagManager() {
         $('tagMgrModal').classList.add('animate-in');
     });
     renderTagManager();
+    // 保存标签分类是整体覆盖，而本地这份只在打开页面时读过一次。
+    // 下载时后端会自动把作者补进「艺术家」分类，这里先拉一次最新的，
+    // 否则接着点保存就会用旧副本把后端刚写的作者覆盖掉。
+    await loadTagConfig();
+    renderTagManager();
+    renderTagBar();
 }
 
 function closeTagManager() {
