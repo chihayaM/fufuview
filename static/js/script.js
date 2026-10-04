@@ -156,7 +156,7 @@ const state = {
     paths: [], comics: [], cur: { p: '', n: '', pgs: [] },
     idx: 0, dbl: true, rtl: true, uiTimer: null, token: 0,
     touchX: 0, lastTap: 0, isMobile: /Android|iPhone|iPad/i.test(navigator.userAgent),
-    random: { pIdx: -1, cIdx: -1, allComics: [] },
+    random: { allComics: [], picks: [] },
     dlTimers: {},
     filterText: '',
     sortMode: 0,
@@ -278,7 +278,7 @@ async function init() {
             // 随机 & 其他
             case 'randomComic': randomComic(); break;
             case 'closeRandom': closeRandom(); break;
-            case 'openRandomComic': openRandomComic(); break;
+            case 'openRandomComic': openRandomComic(el.dataset.idx == null ? 0 : parseInt(el.dataset.idx)); break;
             case 'rerollRandom': rerollRandom(); break;
             case 'cleanDelComics': cleanDelComics(); break;
             case 'resetAllProgress': resetAllProgress(); break;
@@ -2428,6 +2428,8 @@ document.addEventListener('fullscreenchange', () => {
 
 // ==================== 随机漫画 ====================
 
+const RANDOM_PICK = 3;   // 一次抽几本
+
 function buildAllComics() {
     state.random.allComics = [];
     for (let i = 0; i < state.paths.length; i++) (state.comics[i] || []).forEach(c => {
@@ -2443,22 +2445,52 @@ async function randomComic() {
 }
 async function rerollRandom() { await showRandomCard(); }
 
+function pickRandomIndices(pool, count) {
+    // 洗牌后取前 count 个；优先避开上一轮抽过的，凑不够再放回去重抽
+    const last = new Set(state.random.picks.map(p => p.poolIdx));
+    let cand = pool.map((_, i) => i).filter(i => !last.has(i));
+    if (cand.length < count) cand = pool.map((_, i) => i);
+    for (let i = cand.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [cand[i], cand[j]] = [cand[j], cand[i]];
+    }
+    return cand.slice(0, Math.min(count, pool.length));
+}
+
 async function showRandomCard() {
     const pool = state.random.allComics;
     if (!pool.length) return;
-    let pick; do { pick = Math.floor(Math.random() * pool.length); } while (pool.length > 1 && pick === state.random.cIdx);
-    const item = pool[pick]; state.random.pIdx = item.pIdx; state.random.cIdx = pick;
-    const path = state.paths[item.pIdx], name = item.name;
-    $('randomCover').src = ''; $('randomTitle').innerText = name; $('randomMeta').innerText = path;
+    const picks = pickRandomIndices(pool, RANDOM_PICK).map(i => ({ poolIdx: i, ...pool[i] }));
+    state.random.picks = picks;
+
+    const grid = $('randomGrid');
+    grid.innerHTML = picks.map((it, k) => {
+        const path = state.paths[it.pIdx];
+        const src = it.cover
+            ? `/api/image?${new URLSearchParams({ path, comic: it.name, file: it.cover }).toString()}`
+            : '';
+        return `<div class="random-item" data-action="openRandomComic" data-idx="${k}" title="${esc(it.name)}">
+            <div class="random-cover-wrap">
+                <img class="random-cover" src="${src}" alt="" loading="lazy">
+                <div class="random-play-hint">点击阅读</div>
+            </div>
+            <div class="random-title">${esc(it.name)}</div>
+        </div>`;
+    }).join('');
+
     $('randomOverlay').classList.remove('hidden');
     requestAnimationFrame(() => { $('randomOverlay').classList.add('visible'); $('randomCard').classList.add('animate-in'); });
-    // 优先用本地 comics 数据中的 cover，避免额外 pages 请求
-    const comic = (state.comics[item.pIdx] || []).find(c => c.name === name);
-    if (comic?.cover) {
-        $('randomCover').src = `/api/image?${new URLSearchParams({ path, comic: name, file: comic.cover }).toString()}`;
-    } else {
-        try { const data = await api('pages', { path, comic: name }); if (data.pages?.length) $('randomCover').src = `/api/image?${new URLSearchParams({ path, comic: name, file: data.pages[0] }).toString()}`; } catch (e) { }
-    }
+
+    // 少数没有封面数据的，再补一次 pages 查询
+    await Promise.all(picks.map(async (it, k) => {
+        if (it.cover) return;
+        try {
+            const data = await api('pages', { path: state.paths[it.pIdx], comic: it.name });
+            if (!data.pages?.length) return;
+            const img = grid.querySelector(`.random-item[data-idx="${k}"] .random-cover`);
+            if (img) img.src = `/api/image?${new URLSearchParams({ path: state.paths[it.pIdx], comic: it.name, file: data.pages[0] }).toString()}`;
+        } catch (e) { }
+    }));
 }
 
 function closeRandom() {
@@ -2466,12 +2498,12 @@ function closeRandom() {
     setTimeout(() => { $('randomOverlay').classList.add('hidden'); $('randomCard').classList.remove('animate-in'); }, 300);
 }
 
-async function openRandomComic() {
-    const pIdx = state.random.pIdx, name = state.random.allComics[state.random.cIdx]?.name;
-    if (pIdx < 0 || !name) return;
-    const cIdx = (state.comics[pIdx] || []).findIndex(c => c.name === name);
+async function openRandomComic(idx) {
+    const pick = state.random.picks[idx] || state.random.picks[0];
+    if (!pick) return;
+    const cIdx = (state.comics[pick.pIdx] || []).findIndex(c => c.name === pick.name);
     if (cIdx < 0) return;
-    closeRandom(); setTimeout(() => openComic(pIdx, cIdx), 350);
+    closeRandom(); setTimeout(() => openComic(pick.pIdx, cIdx), 350);
 }
 
 // ==================== 下载状态面板 ====================
