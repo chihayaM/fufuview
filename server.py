@@ -358,10 +358,36 @@ def get_jmcomic():
         _jm_client = _jm_option.build_jm_client()
         return _jm_client, _jm_option
 
+
+# 自动打标签时，「作者」归到这个分类里（分类名要跟 tagCategories 里的一致）
+AUTHOR_CATEGORY = '艺术家'
+# 页数超过这个值就自动补一个「长篇」标签
+LONG_ALBUM_PAGES = 50
+
+
+def fetch_album_detail(client, jm_id):
+    """按 JM 号取本子详情，顺便把 jmcomic 丢掉的 total_photos（总页数）捞回来。
+
+    jmcomic 的适配器会把 page_count / pub_date 硬编码成 '0'，所以对象上的
+    page_count 恒为 0，判断不了长篇；原始响应里的 total_photos 才是真实页数。
+    直接读原始响应，若 jmcomic 内部结构变了就退回公开接口（此时拿不到页数）。
+    """
+    import jmcomic
+    try:
+        resp = client.req_api(client.append_params_to_url(client.API_ALBUM, {'id': jm_id}))
+        if not resp.encoded_data or resp.res_data.get('name') is None:
+            jmcomic.ExceptionTool.raise_missing(resp, jm_id)
+        album = jmcomic.JmApiAdaptTool.parse_entity(
+            resp.res_data, jmcomic.JmModuleConfig.album_class())
+        album.total_photos = int(resp.res_data.get('total_photos') or 0)
+        return album
+    except AttributeError:
+        return client.get_album_detail(jm_id)
+
 download_tasks = {}
 dl_lock = threading.Lock()
 
-def _sync_jm_tags(jm_id, album, download_dir=None):
+def _sync_jm_tags(jm_id, album, download_dir=None, total_photos=0):
     """下载完成后同步 JM 标签到 comics_meta.json"""
     if not album:
         return
@@ -383,9 +409,21 @@ def _sync_jm_tags(jm_id, album, download_dir=None):
     }
     sync_tags = [t for t in jm_tags if t not in _SKIP_TAGS]
 
-    # 先判断页数，若无任何标签可写则提前退出（避免昂贵的目录扫描）
-    page_count = getattr(album, 'page_count', 0) or 0
-    if page_count > 50 and '长篇' not in sync_tags:
+    # 作者：既是标签，也要归到「艺术家」分类，不能掉进未分类
+    author_tags = []
+    for a in (getattr(album, 'authors', None) or []):
+        a = str(a).strip()
+        if a and len(a) <= 60 and a not in author_tags and a not in sync_tags:
+            author_tags.append(a)
+    if not author_tags:
+        a = str(getattr(album, 'author', '') or '').strip()
+        if a and len(a) <= 60 and a not in sync_tags:
+            author_tags.append(a)
+    sync_tags.extend(author_tags)
+
+    # 长篇判断用 total_photos（JM 的真实页数）。
+    # 对象上的 page_count 恒为 0，所以以前这段判断从来没生效过。
+    if total_photos > LONG_ALBUM_PAGES and '长篇' not in sync_tags:
         sync_tags.append('长篇')
     if not sync_tags:
         return
@@ -435,24 +473,34 @@ def _sync_jm_tags(jm_id, album, download_dir=None):
         entry = meta.get(key, {})
         existing = entry.get("tags", [])
         truly_new = [t for t in sync_tags if t not in existing]
+        changed = False
         if truly_new:
             entry["tags"] = existing + truly_new
+            changed = True
+        if not entry.get("jm_synced"):
             entry["jm_synced"] = True
+            changed = True
+        if entry.get("jm_id") != jm_id:
             entry["jm_id"] = jm_id
+            changed = True
+
+        # 作者标签归到「艺术家」分类，不然会出现在「未分类」里。
+        # 已经手动归过类的标签一律不动（用户可能特意放进了题材等分类）。
+        if author_tags:
+            cfg = meta.setdefault('__tag_config__', {})
+            cats = cfg.setdefault('tagCategories', {})
+            placed = {t for k, v in cats.items() if k != AUTHOR_CATEGORY for t in v}
+            to_add = [t for t in author_tags
+                      if t not in placed and t not in cats.get(AUTHOR_CATEGORY, [])]
+            if to_add:
+                cats.setdefault(AUTHOR_CATEGORY, []).extend(to_add)
+                changed = True
+
+        if changed:
             meta[key] = entry
             save_meta(meta)
+        if truly_new:
             print(f"🏷️ 同步标签 JM{jm_id}: [{found_folder[:30]}] +{truly_new}")
-        else:
-            needs_save = False
-            if not entry.get("jm_synced"):
-                entry["jm_synced"] = True
-                needs_save = True
-            if entry.get("jm_id") != jm_id:
-                entry["jm_id"] = jm_id
-                needs_save = True
-            if needs_save:
-                meta[key] = entry
-                save_meta(meta)
     with _comics_lock:
         _comics_cache.pop(found_lib, None)
 
@@ -466,14 +514,17 @@ def do_download(jm_ids):
         _broadcast_sse('log', {"id": jm_id, "msg": f"开始搜索 JM{jm_id}"})
         print(f"📥 [{jm_id}] 开始搜索...")
         try:
-            page = client.search_site(search_query=jm_id)
-            album = page.single_album
-            if not album:
-                with dl_lock:
-                    download_tasks[jm_id] = {"status": "error", "progress": "未找到该漫画", "name": ""}
-                _broadcast_sse('log', {"id": jm_id, "msg": "未找到该漫画", "level": "error"})
-                print(f"⚠️ [{jm_id}] 未找到该漫画")
-                return
+            # 直接取详情：一次请求就拿到标题、标签、作者和总页数，比 search_site 少一趟网络
+            try:
+                album = fetch_album_detail(client, jm_id)
+            except Exception as e:
+                if '不存在' in str(e) or 'MissingAlbum' in type(e).__name__:
+                    with dl_lock:
+                        download_tasks[jm_id] = {"status": "error", "progress": "未找到该漫画", "name": ""}
+                    _broadcast_sse('log', {"id": jm_id, "msg": "未找到该漫画", "level": "error"})
+                    print(f"⚠️ [{jm_id}] 未找到该漫画")
+                    return
+                raise
             with dl_lock:
                 download_tasks[jm_id]["name"] = album.name
                 download_tasks[jm_id]["progress"] = f"正在下载... ({idx+1}/{len(jm_ids)})"
@@ -482,16 +533,14 @@ def do_download(jm_ids):
 
             dl_result = option.download_album(jm_id)
             dl_album = dl_result[0] if isinstance(dl_result, tuple) else album
-
-            try:
-                full_album = client.get_album_detail(jm_id)
-                if full_album and hasattr(full_album, 'tags') and full_album.tags:
-                    dl_album = full_album
-            except Exception:
-                pass
+            # album 是下载前取的完整详情（带 tags / authors），同步标签以它为准，
+            # 不用再为标签单独查一次
+            if not getattr(dl_album, 'tags', None) or not getattr(dl_album, 'authors', None):
+                dl_album = album
 
             download_dir = option.dir_rule.base_dir
-            _sync_jm_tags(jm_id, dl_album, download_dir=download_dir)
+            _sync_jm_tags(jm_id, dl_album, download_dir=download_dir,
+                          total_photos=getattr(album, 'total_photos', 0))
 
             with dl_lock:
                 download_tasks[jm_id]["status"] = "done"
@@ -681,6 +730,38 @@ def api_image():
     return jsonify({"error": "not found"}), 404
 
 # ---------- JM 搜索 ----------
+# 按 JM 号查到的详情缓存。禁漫站单次请求就要 4~5 秒，同一个号没必要重复跑网络。
+_lookup_cache = {}
+LOOKUP_TTL = 600  # 秒
+_lookup_lock = threading.Lock()
+
+
+def _pick_cover(album):
+    for attr in ('cover', 'image', 'thumb', 'cover_url'):
+        val = getattr(album, attr, '')
+        if val and isinstance(val, str) and val.startswith('http'):
+            return val
+    return ''
+
+
+def _is_downloaded(jm_id):
+    """书库目录名里含这个 JM 号、且目录非空，就算已下载。"""
+    for lib_path in LIBRARY_PATHS:
+        if not os.path.exists(lib_path):
+            continue
+        try:
+            for d in os.listdir(lib_path):
+                if not os.path.isdir(os.path.join(lib_path, d)) or d == '_trash':
+                    continue
+                if not re.search(r'(^|\D)' + re.escape(jm_id) + r'(\D|$)', d):
+                    continue
+                if os.listdir(os.path.join(lib_path, d)):
+                    return True
+        except OSError:
+            pass
+    return False
+
+
 @app.route('/api/search')
 def api_search():
     err = _require_auth()
@@ -691,41 +772,42 @@ def api_search():
     pure_id = re.sub(r'(?i)^jm', '', q).strip()
     if not pure_id.isdigit():
         return jsonify({"error": f"'{q}' 不是有效的 JM 号"}), 400
-    client, option = get_jmcomic()
-    try:
-        page = client.search_site(search_query=pure_id)
-        album = page.single_album
-        if album:
-            cover_url = ''
-            for attr in ('cover', 'image', 'thumb', 'cover_url'):
-                val = getattr(album, attr, '')
-                if val and isinstance(val, str) and val.startswith('http'):
-                    cover_url = val
-                    break
-            already_downloaded = False
-            for lib_path in LIBRARY_PATHS:
-                if not os.path.exists(lib_path):
-                    continue
-                try:
-                    for d in os.listdir(lib_path):
-                        if os.path.isdir(os.path.join(lib_path, d)) and d != '_trash' and re.search(r'(^|\D)' + re.escape(pure_id) + r'(\D|$)', d):
-                            if os.listdir(os.path.join(lib_path, d)):
-                                already_downloaded = True
-                                break
-                except:
-                    pass
-                if already_downloaded:
-                    break
-            return jsonify({
-                "id": pure_id, "name": album.name,
-                "author": getattr(album, 'author', ''),
-                "tags": getattr(album, 'tags', []),
-                "episode_count": len(getattr(album, 'episodes', {})),
-                "cover": cover_url, "downloaded": already_downloaded,
-            })
-        return jsonify({"error": f"未找到 JM{pure_id}"}), 404
-    except Exception as e:
-        return jsonify({"error": f"搜索失败: {str(e)[:100]}"}), 500
+
+    with _lookup_lock:
+        hit = _lookup_cache.get(pure_id)
+        info = dict(hit[1]) if hit and time.time() - hit[0] < LOOKUP_TTL else None
+
+    if info is None:
+        client = get_jmcomic()[0]
+        # 直接取详情，一次请求就够。
+        # 走 search_site 会先搜一次、再被 302 重定向到详情页，白白多花一趟网络。
+        try:
+            album = client.get_album_detail(pure_id)
+        except Exception as e:
+            if '不存在' in str(e) or 'MissingAlbum' in type(e).__name__:
+                return jsonify({"error": f"未找到 JM{pure_id}"}), 404
+            return jsonify({"error": f"搜索失败: {str(e)[:100]}"}), 500
+        info = {
+            "id": pure_id,
+            "name": album.name,
+            "author": getattr(album, 'author', ''),
+            "tags": getattr(album, 'tags', []),
+            "episode_count": len(getattr(album, 'episode_list', None)
+                                 or getattr(album, 'episodes', {}) or {}),
+            "cover": _pick_cover(album),
+        }
+        with _lookup_lock:
+            if len(_lookup_cache) > 200:  # 顺手清掉过期的，别无限涨
+                now = time.time()
+                for k, v in list(_lookup_cache.items()):
+                    if now - v[0] >= LOOKUP_TTL:
+                        _lookup_cache.pop(k, None)
+            _lookup_cache[pure_id] = (time.time(), info)
+
+    # 是否已下载每次现算：本地目录随时会变，不能跟着缓存走
+    result = dict(info)
+    result['downloaded'] = _is_downloaded(pure_id)
+    return jsonify(result)
 
 # ---------- 下载 ----------
 @app.route('/api/download', methods=['POST'])
