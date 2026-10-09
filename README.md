@@ -239,6 +239,9 @@ plugins:
 | GET | `/api/pages?path=&comic=` | 列出某本漫画的图片 |
 | GET | `/api/image?path=&comic=&file=` | 读取图片（支持 ETag 304） |
 | GET | `/api/search?q=` | 按 JM 号搜索 |
+| GET | `/api/name-search?q=&start=&limit=` | 按名称搜索，翻页取 `limit` 条 |
+| GET | `/api/detail?id=` | 漫画详情（页数/喜欢/观看/标签） |
+| GET | `/cover/<id>?v=` | 封面图代理（3:4 竖版，站点图床要 Referer，浏览器直连会 403） |
 | POST | `/api/download` | 提交下载任务 |
 | GET | `/api/download/status?id=` | 查询单个任务状态 |
 | GET | `/api/download/tasks` | 查询全部任务 |

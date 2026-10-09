@@ -169,6 +169,13 @@ const state = {
     recycleTarget: null,
     jmHistory: [],
     activeJmDownloads: new Set(),  // 跟踪活跃的 JM 下载任务（跨面板开关保持）
+    dlSlots: {},                   // jmId -> Set<元素id>：一个下载可能同时要在编号卡片和名称格子里显示状态
+    jmMode: 'id',                  // 当前页签，默认「按编号」
+    jmNameSeq: 0,                  // 名称搜索的防串台序号
+    jmNameCur: { q: '', next: 0, list: [] },
+    jmNameItems: {},               // id -> 搜索结果里的那条（点详情时先用它渲染）
+    jmDetailId: null,              // 详情弹层当前展示的是哪条
+    jmDetailSeq: 0,                // 详情请求的竞态令牌
     longPressFired: false,
     hoverPreview: localStorage.getItem('hoverPreviewOff') !== '1',  // 鼠标悬浮封面预览开关（记忆用户选择）
     readerOpen: false,
@@ -261,8 +268,18 @@ async function init() {
             case 'closeJmPanel': closeJmPanel(); break;
             case 'toggleMinimizeJm': toggleMinimizeJm(); break;
             case 'doJmSearch': doJmSearch(); break;
-            case 'jmHistSearch': $('jmInput').value = a1; doJmSearch(); break;
-            case 'startJmDownload': startJmDownload(el.dataset.id, el.dataset.name); break;
+            case 'jmHistSearch': switchJmMode('id'); $('jmInput').value = a1; doJmSearch(); break;
+            case 'startJmDownload': startJmDownload(el.dataset.id, el.dataset.name, el.dataset.slot || ''); break;
+            // JM 名称搜索
+            case 'switchJmMode': switchJmMode(a1); break;
+            case 'doNameSearch': doNameSearch(); break;
+            case 'loadMoreNames': loadMoreNames(); break;
+            case 'openJmDetail': openJmDetail(a1); break;
+            case 'closeJmDetail': closeJmDetail(); break;
+            case 'toggleNameCover': toggleNameCover(el.checked); break;
+            // JM 底部任务抽屉
+            case 'switchTaskTab': switchTaskTab(a1); break;
+            case 'toggleTaskbar': toggleTaskbar(); break;
             case 'toggleHoverPreview': toggleHoverPreview(); break;
             case 'sortByLastRead': sortByLastRead(); break;
             case 'closeDlStatus': closeDlStatus(); break;
@@ -347,6 +364,7 @@ async function initApp() {
         }
         if (e.target === $('randomOverlay')) closeRandom();
         if (e.target === $('jmOverlay')) closeJmPanel();
+        if (e.target === $('detailOverlay')) closeJmDetail();
         if (e.target === $('dlOverlay')) closeDlStatus();
         if (e.target === $('tagOverlay')) closeTagModal();
         if (e.target === $('tagMgrOverlay')) closeTagManager();
@@ -397,6 +415,7 @@ async function initApp() {
             if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
             if (!$('tagMgrOverlay').classList.contains('hidden')) { closeTagManager(); return; }
             if (!$('tagPickerOverlay').classList.contains('hidden')) { closeTagPicker(); return; }
+            if (!$('detailOverlay').classList.contains('hidden')) { closeJmDetail(); return; }
             if (!$('jmOverlay').classList.contains('hidden')) { closeJmPanel(); return; }
             if (!$('randomOverlay').classList.contains('hidden')) { closeRandom(); return; }
             if (!$('recycleOverlay').classList.contains('hidden')) { closeRecycleBin(); return; }
@@ -2590,7 +2609,10 @@ function closeDownloadLog() {
 function appendLogLine(idLabel, msg, level) {
     const box = $('jmLog');
     if (!box) return;
-    box.classList.remove('hidden');
+    // 可见性交给任务抽屉的切页控制，这里不再擅自把日志块显出来，
+    // 否则切在「队列」页时也会冒出一块日志、把内容顶下去。
+    if (jmTaskTab !== 'log') jmLogUnread = true;
+    syncJmShared();
     const t = new Date();
     const hhmmss = [t.getHours(), t.getMinutes(), t.getSeconds()]
         .map(n => String(n).padStart(2, '0')).join(':');
@@ -2617,7 +2639,7 @@ function openJmPanel() {
     renderJmHistory();
     renderDownloadHistory();
     openDownloadLog();
-    $('jmInput').focus();
+    $(state.jmMode === 'name' ? 'nameInput' : 'jmInput').focus();
 }
 
 function closeJmPanel() {
@@ -2647,6 +2669,266 @@ function onJmInput() {
     const v = el.value;
     const cleaned = v.replace(/jm(\d+)/gi, '$1');
     if (cleaned !== v) el.value = cleaned;
+}
+
+// ==================== JM 名称搜索 ====================
+
+// 一次取几条。网格固定 4 列，4 条正好一行填满，不会剩个空位。
+const JM_LIMIT = 4;
+// 封面 URL 带个版本号。封面代理回的是 Cache-Control: max-age=3600，
+// 换了取的变体（原图 400×400 → _3x4）之后 URL 没变，浏览器会接着用旧的，
+// 于是新旧混在一起、一半方一半竖。改一次变体就把这个数字提一下。
+const COVER_V = '3x4';
+// 名字里带 jm 前缀：上面 1511 行已经有一个给书架用的 coverUrl()，重名会直接报错
+const jmCoverUrl = id => `/cover/${encodeURIComponent(id)}?v=${COVER_V}`;
+
+/* 空状态。要铺满整行 —— 放在 .jm-grid 里的话默认只占第一列，
+   图标和文字就会挤在左上角，看着像没居中。 */
+const emptyState = (title, sub, ic = 'search') => `
+    <div class="jm-empty" style="grid-column:1/-1">
+      ${icon(ic)}
+      <div>${esc(title)}</div>
+      ${sub ? `<small>${sub}</small>` : ''}
+    </div>`;
+
+const NAME_EMPTY = emptyState('输入漫画名开始搜索',
+    '支持 <code>+全彩 +贫乳</code>、<code>全彩 -贫乳</code>');
+const ID_EMPTY = emptyState('输入 JM 号开始查询',
+    '多个号用逗号 / 空格 / 换行分隔，如 <code>12345 67890</code>');
+
+/* ---------- 底部任务抽屉：队列 / 日志切页 ---------- */
+let jmTaskTab = 'queue';    // 'queue' | 'log'
+let jmLogUnread = false;    // 日志页在后台时，来了新日志就点个小圆点
+
+function switchTaskTab(tab) {
+    jmTaskTab = tab;
+    document.querySelectorAll('.jm-ttab').forEach(t => t.classList.toggle('active', t.dataset.arg1 === tab));
+    $('jmQueue').classList.toggle('hidden', tab !== 'queue');
+    $('jmLog').classList.toggle('hidden', tab !== 'log');
+    if (tab === 'log') jmLogUnread = false;
+    syncJmShared();
+    const body = $('jmTaskBody');
+    if (body) body.scrollTop = body.scrollHeight;
+}
+
+function toggleTaskbar() {
+    const bar = $('jmShared');
+    if (!bar) return;
+    const collapsed = bar.classList.toggle('collapsed');
+    if (!collapsed) {
+        if (jmTaskTab === 'log') jmLogUnread = false;
+        const body = $('jmTaskBody');
+        if (body) body.scrollTop = body.scrollHeight;
+    }
+    syncJmShared();
+}
+
+/* 队列徽标 + 日志未读点。抽屉本身常驻，不再整块隐藏，
+   所以这里只管两处小提示，不碰布局。 */
+function syncJmShared() {
+    const cnt = $('taskQueueCount');
+    if (cnt) {
+        const n = state.activeJmDownloads.size;
+        cnt.textContent = n > 0 ? String(n) : '';
+        cnt.classList.toggle('show', n > 0);
+    }
+    const dot = $('taskLogDot');
+    if (dot) dot.classList.toggle('show', jmLogUnread && jmTaskTab !== 'log');
+}
+
+function switchJmMode(mode) {
+    state.jmMode = mode;
+    document.querySelectorAll('.jm-tab').forEach(t => t.classList.toggle('active', t.dataset.arg1 === mode));
+    $('paneName').classList.toggle('hidden', mode !== 'name');
+    $('paneId').classList.toggle('hidden', mode !== 'id');
+    $(mode === 'name' ? 'nameInput' : 'jmInput').focus();
+}
+
+/* ---------- 封面开关 ---------- */
+// 搜索接口本身不返回封面，封面是按编号另取的一张图，关掉就是完全不发这些请求
+let showNameCover = localStorage.getItem('jmNameCover') !== '0';
+function toggleNameCover(on) {
+    showNameCover = on;
+    localStorage.setItem('jmNameCover', on ? '1' : '0');
+    // 网格靠 CSS class 切换，不重排 DOM，已经取到的图不会被重新请求
+    $('nameGrid').classList.toggle('no-cover', !on);
+    // 详情里那张大图得真的换掉
+    if (state.jmDetailId && !$('detailOverlay').classList.contains('hidden')) {
+        renderJmDetail(state.jmNameItems[state.jmDetailId], false);
+    }
+}
+
+/* ---------- 名称搜索 ---------- */
+async function doNameSearch() {
+    const q = $('nameInput').value.trim();
+    if (!q) return;
+    state.jmNameSeq++;                       // 上一次的结果作废
+    state.jmNameCur = { q, next: 0, list: [] };
+    $('nameMore').innerHTML = '';
+    $('nameBar').innerHTML = '';
+    $('nameGrid').innerHTML = `<div class="jm-grid-loading"><div class="search-spinner"></div>`
+        + `<div>正在搜索「${esc(q)}」…</div>`
+        + `<small style="opacity:.75">禁漫站单次 5~10 秒</small></div>`;
+    const btn = document.querySelector('[data-action="doNameSearch"]');
+    if (btn) btn.disabled = true;
+    await loadMoreNames();
+    if (btn) btn.disabled = false;
+}
+
+async function loadMoreNames() {
+    const my = state.jmNameSeq, q = state.jmNameCur.q, at = state.jmNameCur.next;
+    const btn = $('nameMore').querySelector('button');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="dl-spinner"></span>加载中…'; }
+    try {
+        const r = await fetch(`/api/name-search?q=${encodeURIComponent(q)}&start=${at}&limit=${JM_LIMIT}`);
+        const d = await r.json();
+        if (my !== state.jmNameSeq) return;          // 用户又搜了别的，丢掉这批
+        if (!r.ok) { failName(d.error || ('HTTP ' + r.status)); return; }
+        renderNameResults(d);
+    } catch (err) {
+        if (my === state.jmNameSeq) failName('请求失败: ' + err.message);
+    }
+}
+
+function failName(msg) {
+    $('nameBar').innerHTML = '';
+    $('nameMore').innerHTML = '';
+    $('nameGrid').innerHTML = `<div class="jm-error" style="grid-column:1/-1">${esc(msg)}</div>`;
+}
+
+function renderNameResults(d) {
+    state.jmNameCur.next = d.next_start;
+    const tag = d.cached
+        ? `<span class="jm-badge">缓存 ${d.elapsed}s</span>`
+        : `<span class="jm-badge">网络 ${d.elapsed}s</span>`;
+
+    if (!d.total) {
+        $('nameBar').innerHTML = `「${esc(d.query)}」 ${tag}`;
+        $('nameGrid').innerHTML = emptyState('没有找到匹配的漫画', '换个关键字试试');
+        $('nameMore').innerHTML = '';
+        return;
+    }
+    $('nameBar').innerHTML = `「${esc(d.query)}」 共 <b>${d.total}</b> 条 · 已显示 <b>${d.next_start}</b> 条 ${tag}`;
+
+    // 首批要先把 loading 占位清掉，后面几批是 append
+    if (!state.jmNameCur.list.length) $('nameGrid').innerHTML = '';
+    d.items.forEach(it => { state.jmNameItems[it.id] = it; state.jmNameCur.list.push(it); });
+    $('nameGrid').insertAdjacentHTML('beforeend', d.items.map(nameTile).join(''));
+
+    $('nameMore').innerHTML = d.has_more
+        ? `<button class="btn btn-outline btn-block" data-action="loadMoreNames">加载更多（${JM_LIMIT} 条）</button>`
+        : '<div class="jm-empty" style="padding:24px 0">已经到底了</div>';
+}
+
+/* 一个格子：竖封面 + JM 号 + 名字 + 作者·分类 + 下载状态槽。
+   封面一律渲染，显不显示交给 .no-cover 那个 class —— 这样开关来回拨
+   不用重排 DOM，已经取到的图也不会白扔。 */
+function nameTile(it) {
+    const sub = [it.author, it.category].filter(Boolean).join(' · ');
+    return `
+      <button class="jm-tile" data-action="openJmDetail" data-arg1="${esc(it.id)}">
+        <div class="jm-tile-cover"><img src="${jmCoverUrl(it.id)}" alt="" loading="lazy"></div>
+        <div class="jm-tile-id">JM${esc(it.id)}</div>
+        <div class="jm-tile-name">${esc(it.name)}</div>
+        ${sub ? `<div class="jm-tile-sub">${esc(sub)}</div>` : ''}
+        <div class="jm-tile-status" id="name-dl-${esc(it.id)}">${
+          it.downloaded ? `<span class="dl-done">${icon('checkCircle')} 已下载</span>` : ''}</div>
+      </button>`;
+}
+
+/* ---------- 详情 ---------- */
+/* 点开先用搜索结果里已有的字段渲染，再异步补详情接口的字段。
+   /api/detail 要 7~9 秒，不能白屏干等。 */
+function openJmDetail(id) {
+    const it = state.jmNameItems[id];
+    if (!it) return;
+    state.jmDetailId = id;
+    const my = ++state.jmDetailSeq;
+    const ov = $('detailOverlay');
+    ov.classList.remove('hidden');
+    requestAnimationFrame(() => { ov.classList.add('visible'); $('detailPanel').classList.add('animate-in'); });
+    renderJmDetail(it, true);
+
+    fetch(`/api/detail?id=${encodeURIComponent(id)}`)
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            // 用户可能已经关掉详情、或者点了别的格子，那这批结果就不要了
+            if (my !== state.jmDetailSeq || state.jmDetailId !== id) return;
+            if (!ok) return;                      // 保持第一段渲染的内容，别把已经显示的字段抹掉
+            Object.assign(state.jmNameItems[id], d);
+            renderJmDetail(state.jmNameItems[id], false);
+            const slot = $(`name-dl-${id}`);
+            if (slot && d.downloaded && !slot.innerHTML.trim()) {
+                slot.innerHTML = `<span class="dl-done">${icon('checkCircle')} 已下载</span>`;
+            }
+        })
+        .catch(() => { /* 网络挂了也无所谓，第一段的内容还在 */ });
+}
+
+function closeJmDetail() {
+    state.jmDetailSeq++;                          // 让在途的详情请求作废
+    state.jmDetailId = null;
+    $('detailPanel').classList.remove('animate-in');
+    $('detailOverlay').classList.remove('visible');
+    setTimeout(() => $('detailOverlay').classList.add('hidden'), 300);
+}
+
+/* 详情正文：左封面、右信息，按钮单独一行铺满底部。
+   loading=true 时页数/喜欢/观看还没回来，放骨架条占位。 */
+function renderJmDetail(d, loading) {
+    const tags = (d.tags || []).slice(0, 14);
+    const row = (label, val) => val ? `<div><span>${label}</span><span>${esc(val)}</span></div>` : '';
+    const skel = `<span class="jm-detail-skel"></span>`;
+    const meta = row('作者', d.author)
+               + row('分类', d.category)
+               + row('页数', d.page_count ? d.page_count + ' 页' : (loading ? skel : ''))
+               + row('喜欢', d.likes ? d.likes + ' 次' : (loading ? skel : ''))
+               + row('观看', d.views ? d.views + ' 次' : (loading ? skel : ''));
+
+    $('detailBody').innerHTML = `
+      <div class="jm-detail">
+        ${showNameCover ? `<div class="jm-detail-cover"><img src="${jmCoverUrl(d.id)}" alt="封面"></div>` : ''}
+        <div class="jm-detail-info">
+          <div>
+            <div class="jm-detail-name">${esc(d.name)}</div>
+            <div class="jm-detail-id">JM${esc(d.id)}</div>
+          </div>
+          ${meta ? `<div class="jm-detail-meta">${meta}</div>` : ''}
+          ${tags.length ? `<div class="jm-detail-tags">${tags.map(t => `<span class="search-tag">${esc(t)}</span>`).join('')}</div>` : ''}
+        </div>
+      </div>
+      <div class="jm-detail-actions">
+        ${d.downloaded
+          ? `<div class="dl-done">${icon('checkCircle')} 已下载到本地</div>`
+          : `<button class="jm-download-btn" data-action="startJmDownload" data-id="${esc(d.id)}"
+                     data-name="${esc(d.name)}" data-slot="name-dl-${esc(d.id)}">下载到本地</button>`}
+      </div>`;
+}
+
+/* 一个下载任务可能同时在两处显示状态：编号页签的结果卡（#dl-status-<id>）
+   和名称页签的格子（#name-dl-<id>）。用一个 id 一个定时器、扇出到多个槽位，
+   避免同一个 JM 号在两处出现时 getElementById 只认第一个、另一处永远不动。 */
+function registerDlSlot(jmId, slotId) {
+    (state.dlSlots[jmId] || (state.dlSlots[jmId] = new Set())).add(slotId);
+}
+function setDlStatus(jmId, html) {
+    const slots = state.dlSlots[jmId];
+    if (!slots) return;
+    slots.forEach(sid => { const el = document.getElementById(sid); if (el) el.innerHTML = html; });
+}
+function hasDlSlotElement(jmId) {
+    const slots = state.dlSlots[jmId];
+    if (!slots) return false;
+    for (const sid of slots) if (document.getElementById(sid)) return true;
+    return false;
+}
+
+/* 两个页签的初始空状态，形状一致 */
+if ($('nameGrid')) {
+    $('nameGrid').innerHTML = NAME_EMPTY;
+    $('jmResult').innerHTML = ID_EMPTY;
+    $('coverToggle').checked = showNameCover;
+    $('nameGrid').classList.toggle('no-cover', !showNameCover);
 }
 
 async function doJmSearch() {
@@ -2729,7 +3011,8 @@ async function renderDownloadHistory() {
         data = await api('download/history');
         const { active = [], completed = [], errors = [], total = 0 } = data;
         if (!total) {
-            $('jmQueue').innerHTML = '';
+            $('jmQueue').innerHTML = '<div class="jm-queue-empty">暂无下载任务</div>';
+            syncJmShared();
             return;
         }
         let html = '';
@@ -2761,14 +3044,16 @@ async function renderDownloadHistory() {
             </div>`).join('');
         }
         $('jmQueue').innerHTML = html;
+        syncJmShared();
 
-        // 如果有活跃任务，恢复结果区的轮询 UI
+        // 有活跃任务就恢复结果区的轮询 UI。结果区在编号页签里，名称页签激活时它是隐藏的——
+        // 隐藏时别往里塞东西，否则会把用户之前搜出来的编号结果悄悄冲掉。轮询照常起：
+        // 共享队列那头的进度、顶栏角标、完成后刷新书架都不受影响。
         if (active.length > 0) {
+            const ids = active.map(t => t.id);
             const resultEl = $('jmResult');
-            if (!resultEl) return;
-            const hasStatus = resultEl.querySelector('.dl-progress, .dl-done, .dl-error, .jm-batch-panel');
-            if (!hasStatus) {
-                const ids = active.map(t => t.id);
+            const mustRestore = !!(resultEl && !resultEl.querySelector('.dl-progress, .dl-done, .dl-error, .jm-batch-panel'));
+            if (resultEl && mustRestore && !$('paneId').classList.contains('hidden')) {
                 if (ids.length === 1) {
                     const id = ids[0];
                     resultEl.innerHTML = `<div class="jm-result-card">
@@ -2776,6 +3061,7 @@ async function renderDownloadHistory() {
                         <div class="dl-progress"><div class="dl-spinner"></div> 正在下载...</div>
                         <div class="search-dl-status" id="dl-status-${esc(id)}"></div>
                     </div>`;
+                    registerDlSlot(id, `dl-status-${id}`);
                     if (!state.dlTimers[id]) pollDownloadStatus(id);
                 } else {
                     let batchHtml = `<div class="jm-batch-panel">
@@ -2791,48 +3077,58 @@ async function renderDownloadHistory() {
                     resultEl.innerHTML = batchHtml;
                     ids.forEach(id => { if (!state.dlTimers[id]) pollBatchStatus(id, ids.length); });
                 }
+            } else {
+                // 没往结果区注入（页签隐藏 / 结果区已经有轮询 UI）：只保证每个任务都有定时器在跑
+                ids.forEach(id => { if (!state.dlTimers[id]) pollDownloadStatus(id); });
             }
         }
     } catch (e) { /* ignore */ }
     if (data && $('dlOverlay') && $('dlOverlay').classList.contains('visible')) renderDlStatus(data);
 }
 
-async function startJmDownload(jmId, name) {
+async function startJmDownload(jmId, name, slotId) {
     state.activeJmDownloads.add(jmId);
     updateDownloadBadge(state.activeJmDownloads.size);
-    const statusEl = $(`dl-status-${jmId}`);
-    if (statusEl) statusEl.innerHTML = `<div class="dl-progress"><div class="dl-spinner"></div> 正在启动...</div>`;
+    // 详情弹层是盖在下载面板上的，一开始下载就收起来，好让下面的队列/日志露出来
+    if (!$('detailOverlay').classList.contains('hidden')) closeJmDetail();
+    // 名称页签的格子用自己的 id，编号页签的结果卡用 #dl-status-<id>：
+    // 两个槽位都登记，同一本同时出现在两处时两边都会跟着动。
+    if (slotId) registerDlSlot(jmId, slotId);
+    registerDlSlot(jmId, `dl-status-${jmId}`);
+    setDlStatus(jmId, `<div class="dl-progress"><div class="dl-spinner"></div> 正在启动...</div>`);
     try {
         const data = await apiPost('download', { ids: [jmId] });
-        if (data.error) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(data.error)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
+        if (data.error) { setDlStatus(jmId, `<div class="dl-error">${icon('xCircle')} ${esc(data.error)}</div>`); state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
         pollDownloadStatus(jmId);
-    } catch (e) { if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(e.message)}</div>`; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); }
+        renderDownloadHistory();     // 让共享队列里立刻出现这条
+    } catch (e) { setDlStatus(jmId, `<div class="dl-error">${icon('xCircle')} ${esc(e.message)}</div>`); state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); }
 }
 
 function pollDownloadStatus(jmId) {
     state.activeJmDownloads.add(jmId);
+    registerDlSlot(jmId, `dl-status-${jmId}`);
     if (state.dlTimers[jmId]) clearInterval(state.dlTimers[jmId]);
     state.dlTimers[jmId] = setInterval(async () => {
         try {
             const data = await api('download/status', { id: jmId });
-            const statusEl = $(`dl-status-${jmId}`);
-            // 如果面板关闭且 DOM 元素不存在，停止轮询（交给全局轮询）
-            // 显示这个任务的元素没了（面板关了/重渲染过），停掉细粒度轮询，
+            // 显示这个任务的元素一个都不在了（面板关了 / 被重渲染过），停掉细粒度轮询，
             // 交给全局轮询继续收尾——不能在这里就把 jmId 从 activeJmDownloads 里删掉，
             // 否则下载还没结束，角标就先掉数字了。
-            if (!statusEl && !$('jmOverlay').classList.contains('visible')) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; pollDownloadStatusGlobal(jmId); return; }
+            if (!hasDlSlotElement(jmId) && !$('jmOverlay').classList.contains('visible')) { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; pollDownloadStatusGlobal(jmId); return; }
             if (data.status === 'none') { clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId); updateDownloadBadge(state.activeJmDownloads.size); return; }
             if (data.status === 'pending' || data.status === 'downloading') {
-                if (statusEl) statusEl.innerHTML = `<div class="dl-progress"><div class="dl-spinner"></div>${data.name ? `<span class="dl-name">${esc(data.name)}</span>` : ''}<span>${esc(data.progress)}</span></div>`;
+                setDlStatus(jmId, `<div class="dl-progress"><div class="dl-spinner"></div>${data.name ? `<span class="dl-name">${esc(data.name)}</span>` : ''}<span>${esc(data.progress)}</span></div>`);
             } else if (data.status === 'done') {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
-                if (statusEl) statusEl.innerHTML = `<div class="dl-done">${icon('checkCircle')} ${data.name ? esc(data.name) : '下载完成'}</div>`;
+                setDlStatus(jmId, `<div class="dl-done">${icon('checkCircle')} ${data.name ? esc(data.name) : '下载完成'}</div>`);
                 refreshBookshelfIncremental();
+                renderDownloadHistory();
             } else if (data.status === 'error') {
                 clearInterval(state.dlTimers[jmId]); delete state.dlTimers[jmId]; state.activeJmDownloads.delete(jmId);
                 updateDownloadBadge(state.activeJmDownloads.size);
-                if (statusEl) statusEl.innerHTML = `<div class="dl-error">${icon('xCircle')} ${esc(data.progress)}</div>`;
+                setDlStatus(jmId, `<div class="dl-error">${icon('xCircle')} ${esc(data.progress)}</div>`);
+                renderDownloadHistory();
             }
         } catch (e) { }
     }, 1500);

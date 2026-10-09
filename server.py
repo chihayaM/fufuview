@@ -140,6 +140,11 @@ app = Flask(__name__,
             static_folder=os.path.join(BASE_DIR, 'static'),
             template_folder=os.path.join(BASE_DIR, 'templates'))
 
+# 模板改动后无需重启程序即可生效。本地单用户场景，每次请求多 stat 一下文件的开销可以忽略，
+# 省得改完 index.html 还对着旧界面纳闷。（config.json 仍然要重启才生效。）
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
+
 # ========== 安全护栏 ==========
 _WIN_FORBID_CHARS = set('\\/:*?"<>|\n\t\r')
 
@@ -367,6 +372,23 @@ AUTHOR_CATEGORY = '艺术家'
 LONG_ALBUM_PAGES = 50
 
 
+class _AlbumMissing(Exception):
+    """编号不存在。
+
+    注意别用 jmcomic 的 raise_missing，也别直接读 resp.res_data：
+    编号不存在时站点返回的不是加密体，而是一段明文（encoded_data 是 list），
+    res_data 会拿 list 去 base64 解码，抛出一句看不懂的 TypeError。
+    所以要在这之前先看 encoded_data 的类型。
+
+    消息里必须留「不存在」三个字：do_download 的 except 就是靠这个字符串
+    把「没这本」和「真失败」分开的。
+    """
+
+    def __init__(self, jm_id):
+        super().__init__(f'JM{jm_id} 不存在')
+        self.jm_id = str(jm_id)
+
+
 def fetch_album_detail(client, jm_id):
     """按 JM 号取本子详情，顺便把 jmcomic 丢掉的 total_photos（总页数）捞回来。
 
@@ -377,8 +399,14 @@ def fetch_album_detail(client, jm_id):
     import jmcomic
     try:
         resp = client.req_api(client.append_params_to_url(client.API_ALBUM, {'id': jm_id}))
-        if not resp.encoded_data or resp.res_data.get('name') is None:
-            jmcomic.ExceptionTool.raise_missing(resp, jm_id)
+        # 编号不存在时站点返回的是明文，encoded_data 会是 list（真值），
+        # 直接读 res_data 就会拿 list 去 base64 解码，抛一个看不懂的 TypeError，
+        # 而这个异常不是 AttributeError，捕不到，最后变成「失败: ...」而不是「未找到」。
+        # 所以先看类型：正常返回是 base64 字符串，不是就按「没这本」处理。
+        if not isinstance(resp.encoded_data, str) or not resp.encoded_data:
+            raise _AlbumMissing(jm_id)
+        if not resp.res_data or resp.res_data.get('name') is None:
+            raise _AlbumMissing(jm_id)
         album = jmcomic.JmApiAdaptTool.parse_entity(
             resp.res_data, jmcomic.JmModuleConfig.album_class())
         album.total_photos = int(resp.res_data.get('total_photos') or 0)
@@ -845,6 +873,336 @@ def api_search():
     result = dict(info)
     result['downloaded'] = _is_downloaded(pure_id)
     return jsonify(result)
+
+
+# ---------- 按名称搜索 ----------
+# 站点一次给 80 条，一整页缓存下来能喂饱后面十几次「加载更多」。
+# 别用泛名 CACHE_TTL：主程序已经有 LOOKUP_TTL / DOWNLOAD_TASK_TTL 在跑。
+SEARCH_CACHE_TTL = 600
+SEARCH_CACHE_MAX = 50
+SEARCH_DEFAULT_PAGE_SIZE = 80
+COVER_REFERER = 'https://18comic.vip/'
+COVER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0 Safari/537.36')
+
+_search_cache = {}        # (query, page) -> (ts, {'items': [...], 'total': int})
+_search_locks = {}        # (query, page) -> Lock，同一页并发只打一次网络
+_search_lock = threading.Lock()
+_page_size_seen = SEARCH_DEFAULT_PAGE_SIZE
+
+
+def _known_total(query):
+    """从已缓存的任一页里翻出这个词的总数，用来判断越界。"""
+    now = time.time()
+    with _search_lock:
+        for (q, _p), (ts, payload) in _search_cache.items():
+            if q == query and now - ts < SEARCH_CACHE_TTL:
+                return payload['total']
+    return None
+
+
+def _item(raw, fallback_id=None):
+    """搜索接口的一条 → 前端要的形状。"""
+    if not isinstance(raw, dict):
+        return {'id': str(fallback_id or ''), 'name': str(raw),
+                'author': '', 'category': '', 'tags': []}
+    cat = raw.get('category')
+    cat = cat if isinstance(cat, dict) else {}
+    author = raw.get('author')
+    if isinstance(author, (list, tuple)):      # 详情接口给的是列表，搜索给的是字符串
+        author = ' / '.join(str(a) for a in author if a)
+    return {
+        'id': str(raw.get('id') or fallback_id or ''),
+        'name': raw.get('name') or '',
+        'author': author or '',
+        'category': cat.get('title') or '',
+        'tags': [str(t) for t in (raw.get('tags') or [])],
+    }
+
+
+def _fetch_detail(jm_id):
+    """按 JM 号取详情。直接读原始响应，顺带把 jmcomic 丢掉的 total_photos 捞回来。"""
+    client = get_jmcomic()[0]
+    resp = client.req_api(client.append_params_to_url(client.API_ALBUM, {'id': jm_id}))
+    if not isinstance(resp.encoded_data, str) or not resp.encoded_data:
+        raise _AlbumMissing(jm_id)      # 正常返回是 base64 字符串，不是就是没这本
+    d = resp.res_data
+    if not d or d.get('name') is None:
+        raise _AlbumMissing(jm_id)
+
+    def join(v):
+        if isinstance(v, (list, tuple)):
+            return ' / '.join(str(x) for x in v if x)
+        return str(v or '')
+
+    def num(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        'id': str(d.get('id') or jm_id),
+        'name': d.get('name') or '',
+        'author': join(d.get('author')),
+        'tags': [str(t) for t in (d.get('tags') or [])],
+        'works': [str(t) for t in (d.get('works') or [])],
+        'actors': [str(t) for t in (d.get('actors') or [])],
+        'page_count': num(d.get('total_photos')),
+        'likes': num(d.get('likes')),
+        'views': num(d.get('total_views')),
+    }
+
+
+def _search_page_raw(query, page_no):
+    """直接读搜索接口的原始响应。
+
+    不用 search_site：它的适配层会把 category / category_sub 这种嵌套字段
+    解析成 {'id': None, 'title': None}，标量字段倒是好的。同样是因为丢了数据，
+    取详情时也是绕开适配层直接读原始响应的。
+    """
+    import jmcomic
+    client = get_jmcomic()[0]
+    params = {
+        'main_tag': 0,
+        'search_query': query,
+        'page': page_no,
+        'o': jmcomic.JmMagicConstants.ORDER_BY_LATEST,
+        't': jmcomic.JmMagicConstants.TIME_ALL,
+    }
+    resp = client.req_api(client.append_params_to_url(client.API_SEARCH, params))
+    data = resp.res_data or {}
+
+    redirect = data.get('redirect_aid')
+    if redirect:                     # 搜纯数字号时，站内会重定向到详情页
+        return {'items': [_item(_fetch_detail(str(redirect)))],
+                'total': 1, 'page_size': SEARCH_DEFAULT_PAGE_SIZE}
+
+    return {
+        'items': [_item(it) for it in (data.get('content') or [])],
+        'total': int(data.get('total') or 0),
+        'page_size': _page_size_seen,
+    }
+
+
+def _fetch_page(query, page_no):
+    """取某一页；命中缓存直接回，未命中才走网络。同一页并发只打一次网络。"""
+    key = (query, page_no)
+
+    with _search_lock:
+        hit = _search_cache.get(key)
+        if hit and time.time() - hit[0] < SEARCH_CACHE_TTL:
+            return hit[1], True
+        page_lock = _search_locks.setdefault(key, threading.Lock())
+
+    with page_lock:
+        with _search_lock:                      # 等锁期间可能已被别人填好
+            hit = _search_cache.get(key)
+            if hit and time.time() - hit[0] < SEARCH_CACHE_TTL:
+                return hit[1], True
+
+        global _page_size_seen
+        try:
+            payload = _search_page_raw(query, page_no)
+        except AttributeError:
+            # 客户端换成 html 端实现时没有 API_SEARCH，退回 jmcomic 的解析
+            # （这条路 category 会丢，属于库的限制）
+            page = get_jmcomic()[0].search_site(query, page=page_no)
+            if page.page_size:
+                _page_size_seen = page.page_size
+            payload = {
+                'items': [_item(info, aid) for aid, info in page.content],
+                'total': int(page.total),
+                'page_size': page.page_size,
+            }
+
+        with _search_lock:
+            if len(_search_cache) >= SEARCH_CACHE_MAX:
+                now = time.time()
+                for k, v in list(_search_cache.items()):
+                    if now - v[0] >= SEARCH_CACHE_TTL:
+                        _search_cache.pop(k, None)
+                        _search_locks.pop(k, None)
+                while len(_search_cache) >= SEARCH_CACHE_MAX:
+                    oldest = min(_search_cache.items(), key=lambda kv: kv[1][0])[0]
+                    _search_cache.pop(oldest, None)
+                    _search_locks.pop(oldest, None)
+            _search_cache[key] = (time.time(), payload)
+        return payload, False
+
+
+@app.route('/api/name-search')
+def api_name_search():
+    err = _require_auth()
+    if err: return err
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify({"error": "请输入关键字"}), 400
+
+    try:
+        start = max(0, int(request.args.get('start', 0)))
+        limit = int(request.args.get('limit', 4))
+    except ValueError:
+        return jsonify({"error": "start/limit 必须是数字"}), 400
+    limit = max(1, min(limit, 80))
+
+    t0 = time.time()
+    cursor = start                          # 全局偏移，跨页连续
+    items, net_calls = [], 0
+    total = _known_total(q) or 0
+
+    # 站点对越界的页不返回空，而是塞一批别的本子进来，得自己挡住
+    if total and start >= total:
+        return jsonify({"query": q, "total": total, "start": start, "returned": 0,
+                        "next_start": total, "has_more": False, "cached": True,
+                        "net_calls": 0, "elapsed": 0.0, "items": []})
+
+    # 站点每页固定 80 条，把全局偏移换算成「第几页 + 页内第几条」。
+    # 一次 start 可能横跨两页（比如要第 78~81 条），不够就接着取下一页。
+    while True:
+        if total and cursor >= total:
+            break
+        page_no = cursor // _page_size_seen + 1
+        idx = cursor % _page_size_seen
+        try:
+            payload, cached = _fetch_page(q, page_no)
+        except _AlbumMissing as e:
+            # 纯数字号会被站内重定向到详情页，可能这个号根本不存在
+            return jsonify({"error": f"未找到 JM{e.jm_id}"}), 404
+        except ImportError:
+            return jsonify({"error": "jmcomic 未加载，无法搜索 JM 站点"}), 503
+        except Exception as e:
+            if items:
+                break                       # 已经凑到一些，就先把这批给前端
+            return jsonify({"error": f"{type(e).__name__}: {str(e)[:150]}"}), 500
+
+        total = payload['total']
+        if not cached:
+            net_calls += 1
+        if cursor >= total:             # 越界：站点硬塞的这批不要
+            break
+
+        chunk = payload['items'][idx: idx + (limit - len(items))]
+        items.extend(chunk)
+        cursor += len(chunk)
+
+        if len(items) >= limit or not chunk:
+            break
+
+    # 已下载状态每次现算，本地目录随时会变，所以不进缓存
+    for it in items:
+        it['downloaded'] = _is_downloaded(it['id']) if it['id'] else False
+
+    return jsonify({
+        "query": q,
+        "total": total,
+        "start": start,
+        "returned": len(items),
+        "next_start": cursor,
+        "has_more": bool(items) and cursor < total,
+        "cached": net_calls == 0,           # 只要有一页走了网络就不算缓存命中
+        "net_calls": net_calls,
+        "elapsed": round(time.time() - t0, 2),
+        "items": items,
+    })
+
+
+# ---------- 单本详情（名称搜索点开用） ----------
+_detail_cache = {}
+_detail_lock = threading.Lock()
+
+
+@app.route('/api/detail')
+def api_detail():
+    err = _require_auth()
+    if err: return err
+    jm_id = re.sub(r'(?i)^jm', '', request.args.get('id', '')).strip()
+    if not jm_id.isdigit():
+        return jsonify({"error": "不是有效的 JM 号"}), 400
+
+    with _detail_lock:
+        hit = _detail_cache.get(jm_id)
+        cached = hit is not None and time.time() - hit[0] < SEARCH_CACHE_TTL
+        info = dict(hit[1]) if cached else None
+
+    if info is None:
+        try:
+            info = _fetch_detail(jm_id)
+        except _AlbumMissing:
+            return jsonify({"error": f"未找到 JM{jm_id}"}), 404
+        except ImportError:
+            return jsonify({"error": "jmcomic 未加载，无法查询 JM 站点"}), 503
+        except Exception as e:
+            if '不存在' in str(e) or 'MissingAlbum' in type(e).__name__:
+                return jsonify({"error": f"未找到 JM{jm_id}"}), 404
+            return jsonify({"error": f"取详情失败: {str(e)[:120]}"}), 500
+        with _detail_lock:
+            if len(_detail_cache) > 200:
+                now = time.time()
+                for k, v in list(_detail_cache.items()):
+                    if now - v[0] >= SEARCH_CACHE_TTL:
+                        _detail_cache.pop(k, None)
+                if len(_detail_cache) > 200:
+                    for k, _ in sorted(_detail_cache.items(), key=lambda kv: kv[1][0])[:len(_detail_cache) - 200]:
+                        _detail_cache.pop(k, None)
+            _detail_cache[jm_id] = (time.time(), info)
+
+    # 已下载状态每次现算，本地目录随时会变
+    result = dict(info)
+    result['downloaded'] = _is_downloaded(jm_id)
+    return jsonify(result)
+
+
+# ---------- 封面代理 ----------
+# 搜索接口不返回封面 URL，封面是按编号拼出来的，而且直连 CDN 会 403
+# （要带 Referer）。所以自己代理一张，顺便缓存。
+_cover_cache = {}
+_COVER_CACHE_MAX = 300
+
+
+@app.route('/cover/<aid>')
+def cover(aid):
+    err = _require_auth()
+    if err: return err
+    if not re.fullmatch(r'\d{1,12}', aid):
+        return '', 400
+    hit = _cover_cache.get(aid)
+    if hit is None:
+        try:
+            hit = _fetch_cover(aid) or (None, None)
+        except ImportError:
+            hit = (None, None)              # jmcomic / requests 没装，封面就是取不到
+        if len(_cover_cache) > _COVER_CACHE_MAX:
+            _cover_cache.clear()
+        _cover_cache[aid] = hit
+    mime, data = hit
+    if not data:
+        return '', 404
+    return Response(data, mimetype=mime or 'image/jpeg',
+                    headers={'Cache-Control': 'max-age=3600'})
+
+
+def _fetch_cover(aid):
+    # 两个 import 都放函数里：jmcomic 没装时本地阅读照样能用，只是取不到封面
+    import requests
+    from jmcomic import JmModuleConfig, JmcomicText
+    headers = {'Referer': COVER_REFERER, 'User-Agent': COVER_UA}
+    # 站上有两个变体，实测：
+    #   ''     400×400  方形裁切，46~84KB
+    #   _3x4   400×533  正 3:4 竖图，60~83KB   ← 站上显示的是这个
+    # _3x4 文件大一点，是因为它才是对的形状，不是为了压缩。多这十几 KB
+    # 相对「每张要等几秒」的延迟可以忽略，所以优先取它。
+    for size in ('_3x4', ''):
+        for domain in JmModuleConfig.DOMAIN_IMAGE_LIST:
+            url = JmcomicText.get_album_cover_url(aid, image_domain=domain, size=size)
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+            except Exception:
+                continue
+            if r.status_code == 200 and r.content:
+                return r.headers.get('Content-Type', 'image/jpeg'), r.content
+    return None
+
 
 # ---------- 下载 ----------
 @app.route('/api/download', methods=['POST'])

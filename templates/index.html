@@ -143,24 +143,103 @@
   <!-- JM 下载器弹窗 -->
   <div class="jm-overlay hidden" id="jmOverlay">
     <div class="jm-panel" id="jmPanel">
+      <!-- 顶栏 -->
       <div class="jm-header">
-        <span>JM 漫画下载</span>
+        <div class="jm-brand">
+          <span class="jm-brand-mark" data-icon="download"></span>
+          <div class="jm-brand-text">
+            <span class="jm-title">JM 漫画下载</span>
+            <span class="jm-subtitle">输入编号直接下载，或按名称浏览</span>
+          </div>
+        </div>
         <div class="jm-header-btns">
           <button class="modal-minimize" id="jmMinBtn" data-action="toggleMinimizeJm"><span data-icon="chevronDown"></span></button>
           <button class="modal-close" data-action="closeJmPanel"></button>
         </div>
       </div>
-      <div class="jm-body" id="jmBody">
-        <div class="jm-input-row">
-          <textarea class="jm-textarea" id="jmInput" placeholder="输入 JM 号，支持多个（逗号/空格/换行分隔）&#10;如: 12345, 67890 或每行一个"
-            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doJmSearch()}" oninput="onJmInput()"></textarea>
-          <button class="btn btn-primary" data-action="doJmSearch">搜索</button>
-        </div>
-        <div class="jm-result" id="jmResult"></div>
-        <div class="jm-queue" id="jmQueue"></div>
-        <div class="jm-log hidden" id="jmLog"></div>
-        <div class="jm-history" id="jmHistory"></div>
+
+      <!-- 模式页签 -->
+      <div class="jm-tabs">
+        <button class="jm-tab active" data-action="switchJmMode" data-arg1="id"><span data-icon="bookOpen"></span>按编号搜索</button>
+        <button class="jm-tab" data-action="switchJmMode" data-arg1="name"><span data-icon="search"></span>按名称搜索</button>
       </div>
+
+      <div class="jm-body" id="jmBody">
+        <div class="jm-panes">
+
+        <!-- 按编号 -->
+        <div class="jm-pane" id="paneId">
+          <div class="jm-pane-toolbar">
+            <div class="jm-search-row">
+              <span class="jm-search-ic" data-icon="search"></span>
+              <textarea class="jm-input" id="jmInput" rows="1" placeholder="输入 JM 号，多个用逗号 / 空格 / 换行分隔，如 12345 67890"
+                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doJmSearch()}" oninput="onJmInput()"></textarea>
+              <button class="btn btn-primary" data-action="doJmSearch">搜索</button>
+            </div>
+            <div class="jm-hint">输入单个编号会先查询再下载；输入多个编号则直接批量下载。</div>
+          </div>
+          <div class="jm-pane-scroll">
+            <div class="jm-result" id="jmResult"></div>
+            <div class="jm-history" id="jmHistory"></div>
+          </div>
+        </div>
+
+        <!-- 按名称 -->
+        <div class="jm-pane hidden" id="paneName">
+          <div class="jm-pane-toolbar">
+            <div class="jm-search-row">
+              <span class="jm-search-ic" data-icon="search"></span>
+              <input class="jm-input" id="nameInput" placeholder="输入漫画名，回车搜索"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();doNameSearch()}">
+              <button class="btn btn-primary" data-action="doNameSearch">搜索</button>
+            </div>
+            <div class="jm-bar">
+              <span class="jm-status" id="nameBar"></span>
+              <label class="jm-switch" title="搜索接口不返回封面，封面是按编号另取的一张图">
+                <input type="checkbox" id="coverToggle" data-action="toggleNameCover"> 显示封面
+              </label>
+            </div>
+          </div>
+          <div class="jm-pane-scroll">
+            <div class="jm-grid" id="nameGrid"></div>
+            <div id="nameMore"></div>
+          </div>
+        </div>
+
+        </div><!-- /.jm-panes -->
+
+        <!-- 右侧任务栏：下载队列 / 运行日志，切页共用，可整条收起 -->
+        <aside class="jm-side" id="jmShared">
+          <div class="jm-side-head">
+            <div class="jm-side-tabs">
+              <button class="jm-ttab active" data-action="switchTaskTab" data-arg1="queue" title="下载队列">
+                <span data-icon="download"></span><span class="jm-ttab-label">下载队列</span><span class="jm-ttab-count" id="taskQueueCount"></span>
+              </button>
+              <button class="jm-ttab" data-action="switchTaskTab" data-arg1="log" title="运行日志">
+                <span data-icon="list"></span><span class="jm-ttab-label">运行日志</span><span class="jm-ttab-dot" id="taskLogDot"></span>
+              </button>
+            </div>
+            <button class="jm-side-toggle" id="jmTaskToggle" data-action="toggleTaskbar" title="收起 / 展开侧栏"><span data-icon="chevronRight"></span></button>
+          </div>
+          <div class="jm-taskbar-body" id="jmTaskBody">
+            <div class="jm-queue" id="jmQueue"></div>
+            <div class="jm-log hidden" id="jmLog"></div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <!-- JM 详情弹层（名称搜索点开用） -->
+  <div class="jm-overlay hidden" id="detailOverlay">
+    <div class="jm-panel" id="detailPanel">
+      <div class="jm-header">
+        <button class="btn btn-ghost btn-sm" data-action="closeJmDetail"><span data-icon="chevronLeft"></span>返回</button>
+        <div class="jm-header-btns">
+          <button class="modal-close" data-action="closeJmDetail"></button>
+        </div>
+      </div>
+      <div class="jm-body" id="detailBody"></div>
     </div>
   </div>
 
