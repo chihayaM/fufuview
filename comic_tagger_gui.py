@@ -3,6 +3,11 @@
 漫画自动标签工具 v4.0 — UI 优化版
 """
 import os, sys, json, re, shutil, threading, time
+
+# 作者名解析跟 server.py 共用（author_utils.py 没依赖 tkinter/cv2）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from author_utils import extract_author, resolve_author  # noqa: E402
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,8 +56,7 @@ FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 
 # ===================== 核心逻辑（不变） =====================
-JP_PATTERN = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
-IGNORE_KEYWORDS = ('Digital', 'digital', 'DL', '汉化', '翻译', '中国', '修正', '訳', '译')
+# extract_author / resolve_author 及其辅助规则都在 author_utils.py，跟 server.py 共用
 VALID_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.gif')
 
 _global_pool, _pool_lock = None, threading.Lock()
@@ -112,12 +116,6 @@ def check_colorful(comic_path, sample=5, min_count=4, threshold=20):
         elif sat > threshold: colorful += 1
     return colorful >= min_count, colorful, failed
 
-def extract_author(name):
-    for block in re.findall(r'\[([^\]]+)\]', name):
-        if any(kw in block for kw in IGNORE_KEYWORDS): continue
-        if JP_PATTERN.search(block): return block.strip()
-    return None
-
 def ensure_tag_config(meta):
     meta.setdefault('__tag_config__', {})
     cfg = meta['__tag_config__']
@@ -135,6 +133,8 @@ class ScanEngine:
         self.color_threshold, self.author_min = color_threshold, author_min
         self.long_pages, self.dry_run = long_pages, dry_run
         self.meta = load_meta(meta_path)
+        # 库里现有的艺术家标签，用来把裸作者名并到「社团 (作者)」上
+        self.known_artists = set(ensure_tag_config(self.meta)['tagCategories']['艺术家'])
         self.comic_info, self.author_map, self.valid_authors = [], {}, {}
         self.stats = {'total': 0, 'updated': 0, 'skipped': {}, 'new_artists': [], 'errors': []}
         self._stop = False
@@ -142,6 +142,7 @@ class ScanEngine:
     def scan_dirs(self):
         self.comic_info, self.author_map = [], {}
         scanned = 0
+        raw = []
         for lib_path in self.dirs:
             if not os.path.exists(lib_path): continue
             for name in os.listdir(lib_path):
@@ -149,10 +150,14 @@ class ScanEngine:
                 comic_path = os.path.join(lib_path, name)
                 if not os.path.isdir(comic_path) or name == '_trash': continue
                 scanned += 1
-                key = f"{lib_path}||{name}"
-                author = extract_author(name)
-                self.comic_info.append((key, name, comic_path, author))
-                if author: self.author_map.setdefault(author, []).append(key)
+                raw.append((f"{lib_path}||{name}", name, comic_path, extract_author(name)))
+        # 分两遍：第一遍只收集名字，把这一轮认到的作者也放进候选集，第二遍才解析。
+        # 否则 [moyori] 会比 [imotare (moyori)] 先解析，同一个作者裂成两个标签。
+        candidates = self.known_artists | {a for *_x, a in raw if a}
+        for key, name, comic_path, author in raw:
+            author = resolve_author(author, candidates)
+            self.comic_info.append((key, name, comic_path, author))
+            if author: self.author_map.setdefault(author, []).append(key)
         self.valid_authors = {a: k for a, k in self.author_map.items() if len(k) >= self.author_min}
         return scanned
 
@@ -506,8 +511,8 @@ class App:
              '抽样中饱和度超标的最低数量\n达到此数即判定为「全彩」'),
             ('饱和度阈值', 'color_threshold', 20,  1, 255,
              'HSV 饱和度均值阈值\n低于此值视为灰度/低彩'),
-            ('作者最低本数','author_min',      3,   2, 100,
-             '作者至少要有多少本才自动打标签\n避免偶然同名误判'),
+            ('作者最低本数','author_min',      1,   1, 100,
+             '作者至少要有多少本才自动打标签\n设 1 = 认到名字就打，不设门槛'),
             ('长篇页数阈值','long_pages',     50,  10, 9999,
              '超过此页数自动标记为「长篇」'),
         ]
@@ -535,7 +540,9 @@ class App:
             '无修正': '扫描目录名中包含「無修正」或「无修正」的漫画',
             '长篇':   '页数超过阈值的漫画自动标记为「长篇」',
             '全彩':   '通过饱和度分析检测彩色漫画（需要 opencv）',
-            '作者':   '从目录名 [作者名] 提取作者并自动打标签',
+            '作者':   '从目录名 [作者名] 提取作者并自动打标签\n'
+                      '中文/日文的块优先；纯英文名（[MANA]、[flanvia]）现在也认\n'
+                      '裸名会并到库里已有的「社团 (作者)」标签上，不会重复建',
         }
         self.rule_vars = {}
         for i, (name, default) in enumerate(

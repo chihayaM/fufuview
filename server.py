@@ -24,6 +24,10 @@ try:
 except OSError as e:
     print(f"⚠️ 无法切换工作目录到 {BASE_DIR}: {e}")
 
+# 作者名解析跟 GUI 标签工具共用（author_utils.py 只用 re，不会把 tkinter/cv2 拉进来）
+sys.path.insert(0, BASE_DIR)
+from author_utils import author_key, extract_author, inner_author, resolve_author  # noqa: E402
+
 # ========== 本地配置 ==========
 # config.json 是唯一的配置文件，不纳入版本管理（里面有书库路径和密码）。
 # 缺失时按下面的模板自动生成；每个字段的含义见 README。
@@ -459,23 +463,24 @@ def _sync_jm_tags(jm_id, album, download_dir=None, total_photos=0):
     }
     sync_tags = [t for t in jm_tags if t not in _SKIP_TAGS]
 
-    # 作者：既是标签，也要归到「艺术家」分类，不能掉进未分类
-    author_tags = []
+    # 作者：站点给的是裸名（[MANA] 那批给的作者就是 MANA），这里先原样收着，
+    # 等下面拿到 meta 再并到库里已有的「社团 (作者)」标签上——合并要用当时最新的
+    # 「艺术家」列表，不能在这儿先读一份可能已经过期的。
+    raw_authors = []
     for a in (getattr(album, 'authors', None) or []):
         a = str(a).strip()
-        if a and len(a) <= 60 and a not in author_tags and a not in sync_tags:
-            author_tags.append(a)
-    if not author_tags:
+        if a and len(a) <= 60 and a not in raw_authors and a not in sync_tags:
+            raw_authors.append(a)
+    if not raw_authors:
         a = str(getattr(album, 'author', '') or '').strip()
         if a and len(a) <= 60 and a not in sync_tags:
-            author_tags.append(a)
-    sync_tags.extend(author_tags)
+            raw_authors.append(a)
 
     # 长篇判断用 total_photos（JM 的真实页数）。
     # 对象上的 page_count 恒为 0，所以以前这段判断从来没生效过。
     if total_photos > LONG_ALBUM_PAGES and '长篇' not in sync_tags:
         sync_tags.append('长篇')
-    if not sync_tags:
+    if not sync_tags and not raw_authors:
         return
 
     search_dirs = []
@@ -531,6 +536,25 @@ def _sync_jm_tags(jm_id, album, download_dir=None, total_photos=0):
     key = comic_key(found_lib, found_folder)
     with _meta_lock:
         meta = load_meta()
+        # 裸作者名并到已有的「社团 (作者)」上：站点给的 MANA → けんじゃたいむ (MANA)。
+        # 不并的话同一个作者会分裂成两个标签，作者页多出一条，跟 GUI 那边也对不上。
+        artists = set(meta.get('__tag_config__', {}).get('tagCategories', {}).get(AUTHOR_CATEGORY, []))
+        # 作者有两个来源：目录名里的 [ ] 块（多半是「社团 (作者)」），和站点给的裸名。
+        # 目录名优先——它带着社团名，能直接对上库里已有的标签。两处认出的是同一个人时
+        # 只留一个（按括号里的作者名判重），否则会同时冒出「CrowView (よろず)」和裸的「よろず」。
+        folder_author = extract_author(found_folder)
+        author_tags, seen = [], set()
+        for a in ([folder_author] if folder_author else []) + raw_authors:
+            a = resolve_author(a, artists)
+            if not a or a in sync_tags:
+                continue
+            k = author_key(inner_author(a) or a)
+            if k in seen:
+                continue
+            seen.add(k)
+            author_tags.append(a)
+        sync_tags = sync_tags + author_tags
+
         entry = meta.get(key, {})
         existing = entry.get("tags", [])
         truly_new = [t for t in sync_tags if t not in existing]

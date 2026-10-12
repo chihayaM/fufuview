@@ -230,11 +230,12 @@
     </div>
   </div>
 
-  <!-- JM 详情弹层（名称搜索点开用） -->
+  <!-- 详情弹层：名称搜索 / 本地漫画共用同一套（用 detailMode 区分） -->
   <div class="jm-overlay hidden" id="detailOverlay">
     <div class="jm-panel" id="detailPanel">
       <div class="jm-header">
-        <button class="btn btn-ghost btn-sm" data-action="closeJmDetail"><span data-icon="chevronLeft"></span>返回</button>
+        <button class="btn btn-ghost btn-sm" data-action="closeJmDetail" id="detailBackBtn"><span data-icon="chevronLeft"></span>返回</button>
+        <span class="detail-header-title hidden" id="detailHeaderTitle">漫画详情</span>
         <div class="jm-header-btns">
           <button class="modal-close" data-action="closeJmDetail"></button>
         </div>
@@ -282,45 +283,6 @@
     </div>
   </div>
 
-  <!-- 标签管理弹窗 -->
-  <div class="tag-overlay hidden" id="tagOverlay">
-    <div class="tag-modal detail-panel" id="tagModal">
-      <div class="tag-modal-header">
-        <span>漫画详情</span>
-        <button class="modal-close" data-action="closeTagModal"></button>
-      </div>
-      <div class="tag-modal-body">
-        <!-- 头部：封面 + 标题 + 副标题 -->
-        <div class="detail-header">
-          <img class="detail-cover" id="detailCover" src="" alt="cover">
-          <div class="detail-title-area">
-            <div class="detail-title" id="detailTitle"></div>
-            <div class="detail-subtitle" id="detailSubtitle"></div>
-          </div>
-        </div>
-        <!-- 快捷操作 -->
-        <div class="detail-actions" id="detailActions">
-          <button class="detail-action-btn" id="detailFavBtn" data-action="detailToggleFav"></button>
-          <button class="detail-action-btn" id="detailDelBtn" data-action="detailToggleDel"></button>
-          <button class="detail-action-btn" data-action="detailResetProgress">重置进度</button>
-          <button class="detail-action-btn danger" data-action="detailDeleteComic">删除漫画</button>
-        </div>
-        <!-- 阅读信息 -->
-        <div class="detail-info" id="detailInfo"></div>
-        <!-- 标签管理 -->
-        <div class="detail-tags">
-          <div class="detail-section-label">标签</div>
-          <div class="tag-input-row">
-            <input type="text" class="input" id="tagInput" placeholder="输入标签名..." onkeydown="if(event.key==='Enter')addTag()">
-            <button class="btn btn-primary btn-sm" data-action="addTag">添加</button>
-          </div>
-          <div class="tag-list" id="tagList"></div>
-          <div class="tag-suggestions" id="tagSuggestions"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- 标签管理器弹窗 -->
   <div class="tagmgr-overlay hidden" id="tagMgrOverlay">
     <div class="tagmgr-modal" id="tagMgrModal">
@@ -341,6 +303,13 @@
         <div class="tagmgr-main" id="tagMgrMain"></div>
       </div>
     </div>
+  </div>
+
+  <!-- 点作者后的分支菜单：本地书库筛选 / JM 站内搜索 -->
+  <div class="context-menu hidden" id="authorMenu">
+    <div class="author-menu-head" id="authorMenuInfo"></div>
+    <div class="ctx-item" data-action="authorSearchLocal"><span data-icon="search"></span>在本地书库搜索</div>
+    <div class="ctx-item" data-action="authorSearchJm"><span data-icon="download"></span>在 JM 站内搜索</div>
   </div>
 
   <!-- 右键菜单 -->

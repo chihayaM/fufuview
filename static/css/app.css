@@ -495,6 +495,8 @@ input, textarea, select { font-family: inherit; }
 .ctx-info:hover { background: transparent; }
 .ctx-separator { height: 1px; background: var(--border); margin: 4px 0; }
 .ctx-item-danger { color: var(--danger); }
+/* 作者分支菜单：顶部一行作者名，下面是「本地 / JM」两个去向 */
+.author-menu-head { padding: 6px 16px 8px; font-size: 11px; font-weight: 500; color: var(--text-muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 .ctx-item-danger:hover { background: color-mix(in srgb, var(--danger) 8%, transparent); }
 
 /* ============================================================
@@ -779,9 +781,10 @@ textarea.jm-input { overflow-y: auto; }
 .jm-taskbar-body .jm-queue-item .queue-name { grid-area: 2 / 1 / 3 / 3; }
 
 /* ---- 详情：封面在左，信息在右，按钮单独一行铺满底部 ---- */
-#detailPanel { width: min(660px, 94vw); height: auto; }
-/* 详情内容短，不能跟着 .jm-panel 定死 660 高，也不需要 flex 列 */
-#detailBody { display: block; padding: 20px 24px; overflow-y: auto; }
+#detailPanel { width: min(660px, 94vw); height: auto; max-height: 92vh; }
+/* 详情内容短，不能跟着 .jm-panel 定死 660 高，也不需要 flex 列。
+   本地详情比搜索详情长（多了标签编辑），所以正文单独限高、自己滚。 */
+#detailBody { display: block; padding: 20px 24px; overflow-y: auto; max-height: calc(92vh - 60px); }
 .jm-detail { display: flex; gap: 22px; align-items: flex-start; }
 /* 详情里这张不设比例、也不裁：宽度定死，高度让图片自己撑，
    盒子永远跟封面一样大，横的竖的方的都不会有留白或者被切掉。 */
@@ -841,6 +844,7 @@ textarea.jm-input { overflow-y: auto; }
   /* 手机上面板吃满一点 */
   .jm-panel { width: 96vw; max-width: 96vw; height: 86dvh; max-height: 86dvh; border-radius: var(--r-lg); }
   #detailPanel { height: auto; max-height: 86dvh; }
+  #detailBody { max-height: calc(86dvh - 54px); }
   .jm-header { padding: 12px 14px; }
   .jm-brand-mark { width: 34px; height: 34px; }
   .jm-subtitle { display: none; }
@@ -922,44 +926,55 @@ textarea.jm-input { overflow-y: auto; }
 .recycle-card-pages { padding: 0 8px 6px; font-size: 10px; color: var(--text-muted); }
 
 /* ============================================================
-   标签管理弹窗
+   详情页标签编辑
    ============================================================ */
-.tag-overlay { position: fixed; inset: 0; z-index: 8500; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0); backdrop-filter: blur(0px); transition: background 0.3s, backdrop-filter 0.3s; pointer-events: none; }
-.tag-overlay.visible { background: rgba(0,0,0,0.5); backdrop-filter: blur(10px); pointer-events: auto; }
-.tag-modal { background: var(--bg-elevated); border-radius: var(--r-xl); width: 360px; max-width: 92vw; max-height: 80vh; overflow: hidden; box-shadow: var(--shadow-lg); border: 1px solid var(--border); transform: scale(0.85) translateY(24px); opacity: 0; transition: transform 0.35s var(--ease-spring), opacity 0.25s; display: flex; flex-direction: column; }
-.tag-modal.animate-in { transform: scale(1) translateY(0); opacity: 1; }
-.tag-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; font-size: 15px; font-weight: 700; border-bottom: 1px solid var(--border); }
-.tag-modal-body { padding: 16px 20px; overflow-y: auto; }
-.tag-input-row { display: flex; gap: 8px; margin-bottom: 14px; }
-.tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; min-height: 28px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; min-height: 28px; }
 .tag-chip { display: flex; align-items: center; gap: 5px; padding: 5px 12px; background: var(--brand-soft); color: var(--brand); border-radius: var(--r-pill); font-size: 12px; font-weight: 500; }
 .tag-remove { border: none; background: none; color: var(--brand); cursor: pointer; font-size: 14px; padding: 0; opacity: 0.5; }
 .tag-remove:hover { opacity: 1; }
-.tag-suggestions { display: flex; flex-wrap: wrap; gap: 5px; }
-.tag-suggest-pill { padding: 4px 10px; border: 1px dashed var(--border); background: transparent; border-radius: var(--r-pill); cursor: pointer; font-size: 11px; color: var(--text-muted); transition: all 0.2s; }
-.tag-suggest-pill:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); border-style: solid; }
+.tag-empty { font-size: 12px; color: var(--text-muted); }
 
-/* ---------- 漫画详情面板 ---------- */
-.detail-panel { width: 400px; }
-.detail-header { display: flex; gap: 14px; margin-bottom: 14px; }
-.detail-cover { width: 80px; height: 110px; object-fit: cover; border-radius: var(--r-md); flex-shrink: 0; box-shadow: var(--shadow-sm); border: 1px solid var(--border); }
-.detail-title-area { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
-.detail-title { font-size: 13px; font-weight: 600; color: var(--text); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.5; word-break: break-all; }
-.detail-subtitle { font-size: 11px; color: var(--text-muted); line-height: 1.6; }
-.detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+/* 候选标签：限高可滚，输入即过滤；空输入只列常用几个，不再一次性铺满 */
+.tag-candidates { display: flex; flex-wrap: wrap; gap: 5px; max-height: 180px; overflow-y: auto; scrollbar-width: thin; }
+.tag-suggest-label { flex-basis: 100%; width: 100%; margin: 6px 0 1px; font-size: 10.5px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.tag-suggest-label:first-child { margin-top: 0; }
+.tag-suggest-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1px dashed var(--border); background: transparent; border-radius: var(--r-pill); cursor: pointer; font-size: 11px; color: var(--text-secondary); transition: all 0.2s; }
+.tag-suggest-pill:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); border-style: solid; }
+.tag-suggest-plus { color: var(--brand); font-weight: 700; }
+.tag-suggest-count { font-size: 9.5px; opacity: 0.55; font-variant-numeric: tabular-nums; }
+/* 已经在主页顶部显示的标签：实线描边 + 品牌色，跟隐藏的虚线明显区分 */
+.tag-suggest-visible { border-style: solid; border-color: color-mix(in srgb, var(--brand) 45%, transparent); color: var(--brand); }
+.tag-suggest-empty { font-size: 11.5px; color: var(--text-muted); padding: 4px 0; }
+
+/* 输入全新标签时的就地创建行（不用再弹一层选分类） */
+.tag-new-row { flex-basis: 100%; width: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-sunken); }
+.tag-new-text { font-size: 12px; color: var(--text-secondary); }
+.tag-new-select { flex: 1; min-width: 90px; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12px; color: var(--text); background: var(--bg-elevated); }
+.tag-new-select:focus { outline: none; border-color: var(--brand); }
+
+/* ---------- 漫画详情（本地漫画）：正文沿用 .jm-detail，这里只补头部/操作/标签区 ---------- */
+.detail-header-title { font-size: 15px; font-weight: 700; }
+.detail-actions-row { flex-wrap: wrap; }
 .detail-action-btn { display: inline-flex; align-items: center; gap: 4px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--r-pill); background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: all 0.2s; }
 .detail-action-btn svg { width: 14px; height: 14px; }
 .detail-action-btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
 .detail-action-btn.active { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); font-weight: 600; }
 .detail-action-btn.danger:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
-.detail-info { margin-bottom: 14px; padding: 10px 12px; background: var(--bg-sunken); border-radius: var(--r-md); display: flex; flex-direction: column; gap: 8px; }
-.detail-info-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.detail-info-label { color: var(--text-muted); flex-shrink: 0; }
-.detail-info-value { color: var(--text-secondary); margin-left: auto; }
-.detail-progress-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-.detail-progress-fill { height: 100%; background: var(--brand); border-radius: 2px; transition: width 0.3s; }
-.detail-tags { border-top: 1px solid var(--border); padding-top: 12px; }
-.detail-section-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+.detail-tagedit { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.detail-tagedit-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; border: none; background: none; font: inherit; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; }
+.detail-tagedit-toggle:hover { color: var(--brand); }
+.tag-count { font-size: 11px; font-weight: 500; color: var(--text-muted); background: var(--surface-hover); border-radius: var(--r-pill); padding: 1px 7px; font-variant-numeric: tabular-nums; }
+.tag-count:empty { display: none; }
+.detail-tagedit-chevron { margin-left: auto; display: flex; color: var(--text-muted); }
+.detail-tagedit-chevron svg { width: 16px; height: 16px; transition: transform 0.2s; }
+.detail-tagedit-toggle.open .detail-tagedit-chevron svg { transform: rotate(180deg); }
+.detail-tagedit-body { margin-top: 12px; }
+/* 详情里的作者：点一下就去站内按名称搜索 */
+.jm-detail-meta .meta-link { background: none; border: none; padding: 0; font: inherit; color: var(--brand); cursor: pointer; }
+.jm-detail-meta .meta-link:hover { text-decoration: underline; }
+
+/* 名称搜索滚到底自动加载时的提示行 */
+.jm-more-loading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 20px 0; font-size: 12px; color: var(--text-muted); }
 
 /* ============================================================
    标签管理器 + 标签选择器 + 分页器 + 侧栏辅助 + 响应式

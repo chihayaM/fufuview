@@ -166,6 +166,7 @@ const state = {
     homepageTags: new Set(), // 主页显示标签白名单（只有在此集合里的标签才出现在主页）
     tagCategories: {},       // tag 分类 { catName: [tag1, tag2, ...] }
     ctxTarget: null,
+    authorTarget: '',        // 作者分支菜单里当前点的那个作者
     recycleTarget: null,
     jmHistory: [],
     activeJmDownloads: new Set(),  // 跟踪活跃的 JM 下载任务（跨面板开关保持）
@@ -173,9 +174,11 @@ const state = {
     jmMode: 'id',                  // 当前页签，默认「按编号」
     jmNameSeq: 0,                  // 名称搜索的防串台序号
     jmNameCur: { q: '', next: 0, list: [] },
+    jmNameLoading: false,          // 名称搜索「滚到底自动加载」的并发闸
     jmNameItems: {},               // id -> 搜索结果里的那条（点详情时先用它渲染）
     jmDetailId: null,              // 详情弹层当前展示的是哪条
     jmDetailSeq: 0,                // 详情请求的竞态令牌
+    detailMode: 'jm',              // 详情弹层当前是 'jm'（搜索结果）还是 'local'（本地漫画）
     longPressFired: false,
     hoverPreview: localStorage.getItem('hoverPreviewOff') !== '1',  // 鼠标悬浮封面预览开关（记忆用户选择）
     readerOpen: false,
@@ -191,6 +194,7 @@ const PER_PAGE = 60;       // 每次加载数量
 const SORT_LABELS = [icon('calendar') + ' 最新', icon('calendar') + ' 最旧', icon('clock') + ' 最近'];
 const SORT_MODES = ['mtime-desc', 'mtime-asc', 'lastRead-desc'];
 const FAV_TAG = '收藏';  // virtual tag for data comparison
+const AUTHOR_CAT = '艺术家';  // 下载时后端把作者标签写进这个分类（对齐 server.py 的 AUTHOR_CATEGORY）
 
 const api = async (ep, params = {}) => {
     const res = await fetch(`/api/${ep}?` + new URLSearchParams(params).toString());
@@ -239,10 +243,10 @@ async function init() {
             case 'addTagDirect': addTagDirect(a1); break;
             case 'addNewTagWithCat': addNewTagWithCat(a1, a2); break;
             case 'addTag': addTag(); break;
+            case 'createTagFromInput': createTagFromInput(); break;
             case 'removeTag': removeTag(a1); break;
             case 'openTagManager': openTagManager(); break;
             case 'closeTagManager': closeTagManager(); break;
-            case 'closeTagModal': closeTagModal(); break;
             case 'toggleTagVisibility': toggleTagVisibility(a1); break;
             case 'filterByTagFromMgr': filterByTagFromMgr(a1); break;
             case 'createTagCategory': createTagCategory(); break;
@@ -273,7 +277,6 @@ async function init() {
             // JM 名称搜索
             case 'switchJmMode': switchJmMode(a1); break;
             case 'doNameSearch': doNameSearch(); break;
-            case 'loadMoreNames': loadMoreNames(); break;
             case 'openJmDetail': openJmDetail(a1); break;
             case 'closeJmDetail': closeJmDetail(); break;
             case 'toggleNameCover': toggleNameCover(el.checked); break;
@@ -306,6 +309,10 @@ async function init() {
             case 'detailToggleDel': detailToggleDel(); break;
             case 'detailResetProgress': detailResetProgress(); break;
             case 'detailDeleteComic': detailDeleteComic(); break;
+            case 'toggleTagEditor': toggleTagEditor(); break;
+            case 'openAuthorMenu': openAuthorMenu(el, a1); break;
+            case 'authorSearchLocal': authorSearchLocal(a1); break;
+            case 'authorSearchJm': authorSearchJm(a1); break;
             // 登录
             case 'doLogin': doLogin(); break;
         }
@@ -347,6 +354,7 @@ async function initApp() {
     initSidebarCollapse();
     updateHoverPreviewBtn();
     initPageSlider();
+    initAuthorMenuScrollHide();
 
     // 全局点击：关闭侧边栏、右键菜单、弹窗
     const closeMenus = (e) => {
@@ -361,12 +369,12 @@ async function initApp() {
         if (!e.target.closest('.context-menu')) {
             $('contextMenu').classList.add('hidden');
             $('recycleMenu').classList.add('hidden');
+            $('authorMenu').classList.add('hidden');
         }
         if (e.target === $('randomOverlay')) closeRandom();
         if (e.target === $('jmOverlay')) closeJmPanel();
         if (e.target === $('detailOverlay')) closeJmDetail();
         if (e.target === $('dlOverlay')) closeDlStatus();
-        if (e.target === $('tagOverlay')) closeTagModal();
         if (e.target === $('tagMgrOverlay')) closeTagManager();
         if (e.target === $('tagPickerOverlay')) closeTagPicker();
         if (e.target === $('recycleOverlay')) closeRecycleBin();
@@ -379,10 +387,14 @@ async function initApp() {
     // 手机端 touch 兜底：长按呼出菜单后，tap 其他区域即关
     document.addEventListener('touchstart', (e) => {
         const ctx = $('contextMenu');
-        if (!ctx.classList.contains('hidden') && !e.target.closest('.context-menu')) {
-            ctx.classList.add('hidden');
-            // 阻止后续 click 冒泡到卡片，避免误触进入阅读
-            e.preventDefault();
+        const am = $('authorMenu');
+        if (!e.target.closest('.context-menu')) {
+            if (!am.classList.contains('hidden')) am.classList.add('hidden');
+            if (!ctx.classList.contains('hidden')) {
+                ctx.classList.add('hidden');
+                // 阻止后续 click 冒泡到卡片，避免误触进入阅读
+                e.preventDefault();
+            }
         }
     }, { passive: false });
 
@@ -411,8 +423,8 @@ async function initApp() {
         }
         if ((e.key === 'e' || e.key === 'E') && !isTypingTarget(e.target)) { toggleAppFullscreen(); return; }
         if (e.key === 'Escape') {
+            if (!$('authorMenu').classList.contains('hidden')) { $('authorMenu').classList.add('hidden'); return; }
             if (!$('contextMenu').classList.contains('hidden')) { $('contextMenu').classList.add('hidden'); return; }
-            if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
             if (!$('tagMgrOverlay').classList.contains('hidden')) { closeTagManager(); return; }
             if (!$('tagPickerOverlay').classList.contains('hidden')) { closeTagPicker(); return; }
             if (!$('detailOverlay').classList.contains('hidden')) { closeJmDetail(); return; }
@@ -602,7 +614,7 @@ function setupBookshelfDelegation() {
                 if (!$('contextMenu').classList.contains('hidden')) return;
                 if (!$('randomOverlay').classList.contains('hidden')) return;
                 if (!$('jmOverlay').classList.contains('hidden')) return;
-                if (!$('tagOverlay').classList.contains('hidden')) return;
+                if (!$('detailOverlay').classList.contains('hidden')) return;
                 if (hoverCard !== card) return;  // 鼠标已移到别的卡片，跳过
                 showPreview(card, e);
             }, 500);
@@ -754,12 +766,7 @@ function renderHomepageTags() {
 }
 
 function clearAllHomepageTags() {
-    state.activeTags.clear();
-    renderHomepageTags();
-    renderActiveTags();
-    updateTagPickerBtn();
-    invalidateCache();
-    applyFilters();
+    setTags(s => s.clear());
 }
 
 function updateHomepageTagsExpandBtn() {
@@ -1138,17 +1145,23 @@ function cleanAllRecycle() {
     body.addEventListener('touchmove', () => clearTimeout(lt));
 })();
 
-function toggleTagFilter(tag) {
-    if (state.activeTags.has(tag)) {
-        state.activeTags.delete(tag);
-    } else {
-        state.activeTags.add(tag);
-    }
+/* 统一改 activeTags 的唯一入口：改完刷新所有相关视图 + 失效缓存 + 重新筛选。
+   各处不要再单独改 state.activeTags，否则容易漏刷（历史 bug 来源）。 */
+function setTags(mutate) {
+    mutate(state.activeTags);
     renderHomepageTags();
     renderActiveTags();
     updateTagPickerBtn();
     invalidateCache();
     applyFilters();
+}
+
+function toggleTagFilter(tag) {
+    setTags(s => s.has(tag) ? s.delete(tag) : s.add(tag));
+}
+
+function selectOnlyTag(tag) {
+    setTags(s => { s.clear(); s.add(tag); });
 }
 
 function togglePathFilter(idx) {
@@ -1578,7 +1591,7 @@ function showCtxMenu(e, pIdx, name) {
 function ctxOpenDetail() {
     if (!state.ctxTarget) return;
     $('contextMenu').classList.add('hidden');
-    openDetailPanel(state.ctxTarget.pIdx, state.ctxTarget.name);
+    openLocalDetail(state.ctxTarget.pIdx, state.ctxTarget.name);
 }
 
 async function ctxToggleDel() {
@@ -1604,75 +1617,149 @@ async function ctxToggleDel() {
 }
 
 // ==================== 漫画详情面板 ====================
+// 本地漫画详情与 JM 搜索详情共用 #detailOverlay / #detailPanel，用 state.detailMode 区分。
+// 本地没有「喜欢 / 观看」数据，这两行直接不渲染。
 
-function openDetailPanel(pIdx, name) {
+function syncDetailHeader() {
+    const isLocal = state.detailMode === 'local';
+    $('detailBackBtn').classList.toggle('hidden', isLocal);   // 本地详情没有「上一页」可返回
+    $('detailHeaderTitle').classList.toggle('hidden', !isLocal);
+}
+
+function showDetailPanel() {
+    const ov = $('detailOverlay');
+    ov.classList.remove('hidden');
+    requestAnimationFrame(() => { ov.classList.add('visible'); $('detailPanel').classList.add('animate-in'); });
+}
+
+function openLocalDetail(pIdx, name) {
     const comic = (state.comics[pIdx] || []).find(c => c.name === name);
     if (!comic) return;
     state.ctxTarget = { pIdx, name };
+    state.detailMode = 'local';
+    state.jmDetailId = null;
+    state.jmDetailSeq++;                       // 作废在途的 JM 详情请求，免得回来覆盖本地详情
+    syncDetailHeader();
+    renderLocalDetail(comic);
+    showDetailPanel();
+}
 
-    // 封面
+/* 本地详情正文：套用搜索详情那套 .jm-detail —— 封面在左、信息在右。 */
+function renderLocalDetail(comic) {
+    hideAuthorMenu();          // 重渲染会把锚点按钮换掉，菜单留着就指到空气了
+    const { pIdx, name } = state.ctxTarget;
     const path = state.paths[pIdx];
-    const coverImg = $('detailCover');
-    if (comic.cover) {
-        coverImg.src = coverUrl(path, name, comic.cover);
-        coverImg.style.display = '';
-    } else {
-        coverImg.src = '';
-        coverImg.style.display = 'none';
-    }
-
-    // 标题 + 副标题
-    $('detailTitle').innerText = name;
     const libName = path.split('\\').pop() || path;
-    const dateStr = comic.mtime ? new Date(comic.mtime * 1000).toLocaleDateString('zh-CN') : '';
-    let subtitle = `${comic.pages || '?'}P · ${libName}`;
-    if (dateStr) subtitle += ` · ${dateStr}`;
-    if (comic.jmId) subtitle += ` · JM${comic.jmId}`;
-    $('detailSubtitle').innerText = subtitle;
+    const row = (label, val) => val ? `<div><span>${label}</span><span>${esc(val)}</span></div>` : '';
+    // 作者是「艺术家」分类里的标签，提到页数上面单独一行（点它弹分支菜单）；标签区里仍保留那个 chip
+    const authorTags = (comic.tags || []).filter(t => (state.tagCategories[AUTHOR_CAT] || []).includes(t));
+    const authorRow = authorTags.length
+        ? `<div><span>作者</span><span>${authorTags.map(t =>
+            `<button class="meta-link" data-action="openAuthorMenu" data-arg1="${esc(t)}" title="在本地书库或 JM 站内搜索该作者">${esc(t)}</button>`
+          ).join(' / ')}</span></div>`
+        : '';
+    const meta = authorRow
+               + row('页数', comic.pages ? comic.pages + ' 页' : '')
+               + row('书库', libName)
+               + row('修改时间', comic.mtime ? new Date(comic.mtime * 1000).toLocaleDateString('zh-CN') : '')
+               + row('阅读进度', (comic.readProgress > 0 && comic.pages > 0) ? `第 ${comic.readProgress} 页 / 共 ${comic.pages} 页` : '')
+               + row('上次阅读', comic.lastRead ? (relTime(comic.lastRead) || new Date(comic.lastRead * 1000).toLocaleString('zh-CN')) : '');
+    const tags = comic.tags || [];
 
-    // 快捷操作按钮状态
+    $('detailBody').innerHTML = `
+      <div class="jm-detail">
+        ${comic.cover ? `<div class="jm-detail-cover"><img src="${coverUrl(path, name, comic.cover)}" alt="封面"></div>` : ''}
+        <div class="jm-detail-info">
+          <div>
+            <div class="jm-detail-name">${esc(name)}</div>
+            ${comic.jmId ? `<div class="jm-detail-id">JM${esc(comic.jmId)}</div>` : ''}
+          </div>
+          ${meta ? `<div class="jm-detail-meta">${meta}</div>` : ''}
+          <div class="jm-detail-tags">${tags.map(t => `<span class="search-tag">${esc(t)}</span>`).join('')}</div>
+        </div>
+      </div>
+      <div class="jm-detail-actions detail-actions-row">
+        <button class="detail-action-btn" id="detailFavBtn" data-action="detailToggleFav"></button>
+        <button class="detail-action-btn" id="detailDelBtn" data-action="detailToggleDel"></button>
+        <button class="detail-action-btn" data-action="detailResetProgress">${icon('refresh')} 重置进度</button>
+        <button class="detail-action-btn danger" data-action="detailDeleteComic">${icon('trash')} 删除漫画</button>
+      </div>
+      <div class="detail-tagedit">
+        <button class="detail-tagedit-toggle" id="tagEditToggle" data-action="toggleTagEditor">
+          <span>标签管理</span>
+          <span class="tag-count" id="tagCount"></span>
+          <span class="detail-tagedit-chevron">${icon('chevronDown')}</span>
+        </button>
+        <div class="detail-tagedit-body hidden" id="tagEditBody">
+          <div class="tag-list" id="tagList"></div>
+          <input type="text" class="input" id="tagInput" placeholder="搜索已有标签，或输入新标签后回车"
+            oninput="renderTagCandidates(this.value)"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addTag()}">
+          <div class="tag-candidates" id="tagCandidates"></div>
+        </div>
+      </div>`;
+
     renderDetailActions(comic);
+    renderTagList(tags);
+    renderTagCandidates('');
+}
 
-    // 阅读信息
-    renderDetailInfo(comic);
+/* 点详情页里的作者：先弹个小菜单，让用户选「在本地书库搜」还是「在 JM 站内搜」。 */
+function openAuthorMenu(anchor, author) {
+    if (!author) return;
+    state.authorTarget = author;
+    const menu = $('authorMenu');
+    $('authorMenuInfo').textContent = '作者：' + author;
+    menu.classList.remove('hidden');
+    const a = anchor.getBoundingClientRect();
+    requestAnimationFrame(() => {
+        const rect = menu.getBoundingClientRect();
+        let x = a.left, y = a.bottom + 6;
+        if (x + rect.width > window.innerWidth - 8) x = window.innerWidth - rect.width - 8;
+        if (y + rect.height > window.innerHeight - 8) y = a.top - rect.height - 6;  // 下面放不开就翻到上面
+        menu.style.left = Math.max(8, x) + 'px';
+        menu.style.top = Math.max(8, y) + 'px';
+    });
+}
 
-    // 标签区域
-    renderTagList(comic.tags || []);
-    renderTagSuggestions(comic.tags || []);
-    $('tagInput').value = '';
+function hideAuthorMenu() { $('authorMenu').classList.add('hidden'); }
 
-    $('tagOverlay').classList.remove('hidden');
-    requestAnimationFrame(() => { $('tagOverlay').classList.add('visible'); $('tagModal').classList.add('animate-in'); });
+// 详情正文一滚，菜单就跟锚点脱节了，直接收掉
+function initAuthorMenuScrollHide() {
+    const body = $('detailBody');
+    if (body) body.addEventListener('scroll', hideAuthorMenu, { passive: true });
+}
+
+/* 本地搜索：作者本来就是「艺术家」分类下的标签，直接拿它去筛书架。 */
+function authorSearchLocal(author) {
+    const tag = author || state.authorTarget;
+    hideAuthorMenu();
+    if (!tag) return;
+    closeJmDetail();
+    selectOnlyTag(tag);
+}
+
+/* JM 站内搜索：收起详情，跳到 JM 面板的「按名称搜索」并用作者名搜一遍。 */
+function authorSearchJm(author) {
+    const tag = author || state.authorTarget;
+    if (!tag) return;
+    hideAuthorMenu();
+    closeJmDetail();
+    $('nameInput').value = tag;
+    state.jmNameCur = null;      // 别让上一次搜索的残留在这会儿触发自动补页
+    openJmPanel();
+    switchJmMode('name');
+    doNameSearch();
 }
 
 function renderDetailActions(comic) {
-    $('detailFavBtn').innerHTML = comic.fav ? `${icon('heart')} 已收藏` : `${icon('star')} 收藏`;
-    $('detailFavBtn').classList.toggle('active', !!comic.fav);
+    const fav = $('detailFavBtn'), del = $('detailDelBtn');
+    if (!fav || !del) return;
+    fav.innerHTML = comic.fav ? `${icon('heart')} 已收藏` : `${icon('star')} 收藏`;
+    fav.classList.toggle('active', !!comic.fav);
     const isDel = (comic.tags || []).includes('del');
-    $('detailDelBtn').innerHTML = isDel ? `${icon('refresh')} 取消待删除` : `${icon('trash')} 待删除`;
-    $('detailDelBtn').classList.toggle('active', isDel);
-}
-
-function renderDetailInfo(comic) {
-    let html = '';
-    // 阅读进度
-    if (comic.readProgress > 0 && comic.pages > 0) {
-        const pct = Math.min(100, Math.round(comic.readProgress / comic.pages * 100));
-        html += `<div class="detail-info-row">
-            <span class="detail-info-label">阅读进度</span>
-            <div class="detail-progress-bar"><div class="detail-progress-fill" style="width:${pct}%"></div></div>
-            <span class="detail-info-value">第${comic.readProgress}页 / 共${comic.pages}页</span>
-        </div>`;
-    }
-    // 上次阅读
-    if (comic.lastRead) {
-        const t = relTime(comic.lastRead) || new Date(comic.lastRead * 1000).toLocaleString('zh-CN');
-        html += `<div class="detail-info-row"><span class="detail-info-label">上次阅读</span><span class="detail-info-value">${esc(t)}</span></div>`;
-    }
-    if (!html) {
-        html = '<div class="detail-info-row"><span class="detail-info-label">暂无阅读记录</span></div>';
-    }
-    $('detailInfo').innerHTML = html;
+    del.innerHTML = isDel ? `${icon('refresh')} 取消待删除` : `${icon('trash')} 待删除`;
+    del.classList.toggle('active', isDel);
 }
 
 async function detailToggleFav() {
@@ -1708,7 +1795,7 @@ async function detailToggleDel() {
         if (card) card.classList.toggle('is-del', res.tags.includes('del'));
         renderDetailActions(comic);
         renderTagList(res.tags);
-        renderTagSuggestions(res.tags);
+        renderTagCandidates('');
         loadStats();
         // 正常视图会过滤掉 del 的漫画，标完要重排才算数（详情面板保持打开）
         invalidateCache();
@@ -1725,15 +1812,15 @@ async function detailResetProgress() {
     if (res.ok) {
         comic.lastRead = 0;
         comic.readProgress = 0;
-        renderDetailInfo(comic);
-        toast('阅读进度已重置');
+        renderLocalDetail(comic);
+        showToast('阅读进度已重置', 'success');
     }
 }
 
 async function detailDeleteComic() {
     if (!state.ctxTarget) return;
     const { pIdx, name } = state.ctxTarget;
-    closeTagModal();
+    closeJmDetail();
     showConfirm(icon('trash'), `删除「${name}」？`, '文件将被永久删除，无法恢复。', '确认删除', async () => {
         try {
             const res = await apiPost('delete-comic', { path: state.paths[pIdx], name });
@@ -1756,96 +1843,138 @@ async function detailDeleteComic() {
     });
 }
 
-function closeTagModal() {
-    $('tagOverlay').classList.remove('visible');
-    setTimeout(() => { $('tagOverlay').classList.add('hidden'); $('tagModal').classList.remove('animate-in'); }, 300);
+/* ---------- 标签编辑（详情页内） ---------- */
+
+const TAG_CAND_LIMIT = 24;                    // 空输入时最多列这么多个常用标签
+const TAG_LAST_CAT_KEY = 'jmTagLastCat';      // 记住上次给新标签选的分类
+
+/* 标签编辑区默认收起；展开状态不跨漫画记住，每次打开详情都从收起开始。 */
+function toggleTagEditor() {
+    const body = $('tagEditBody');
+    if (!body) return;
+    const open = body.classList.contains('hidden');   // 现在是收起状态 → 要展开
+    body.classList.toggle('hidden', !open);
+    const btn = $('tagEditToggle');
+    if (btn) btn.classList.toggle('open', open);
+    if (open) { const i = $('tagInput'); if (i) i.focus(); }
 }
 
 function renderTagList(tags) {
     $('tagList').innerHTML = tags.map(t =>
         `<span class="tag-chip">${esc(t)} <button class="tag-remove" data-action="removeTag" data-arg1="${esc(t)}">${icon('x')}</button></span>`
     ).join('') || '<span class="tag-empty">暂无标签</span>';
+    const c = $('tagCount');
+    if (c) c.textContent = tags.length || '';   // 收起时也能看到有几个标签
 }
 
-function renderTagSuggestions(currentTags) {
-    // 推荐所有已有标签（排除 del、收藏），按分类分组显示
-    const suggestions = Object.entries(state.allTags)
-        .filter(([t]) => !currentTags.includes(t) && t !== 'del' && t !== FAV_TAG)
-        .sort((a, b) => b[1] - a[1]);
-    if (!suggestions.length) { $('tagSuggestions').innerHTML = ''; return; }
+/* 在已有标签里按名字精确找（忽略大小写），返回库里的原始写法。 */
+function findTagExact(raw) {
+    const q = (raw || '').trim().toLowerCase();
+    if (!q) return null;
+    return Object.keys(state.allTags).find(t => t.toLowerCase() === q) || null;
+}
+
+/* 候选区：输入即过滤，空输入只列最常用的几个，不再把几百个标签一次性铺出来。
+   有过滤词时按分类分组；输入的是一个全新标签时，在最上面给出就地「创建」行。 */
+function renderTagCandidates(filter) {
+    const el = $('tagCandidates');
+    if (!el) return;
+    const tg = state.ctxTarget;
+    const cur = tg ? ((state.comics[tg.pIdx] || []).find(c => c.name === tg.name) || {}).tags || [] : [];
+    const raw = (filter || '').trim();
+    const q = raw.toLowerCase();
 
     const cats = state.tagCategories || {};
     const tagToCat = {};
-    for (const [cat, tags] of Object.entries(cats)) {
-        for (const t of tags) tagToCat[t] = cat;
-    }
+    for (const [cat, tags] of Object.entries(cats)) for (const t of tags) tagToCat[t] = cat;
 
-    const grouped = {};
-    const uncategorized = [];
-    for (const [t, count] of suggestions) {
-        const cat = tagToCat[t];
-        if (cat) {
-            if (!grouped[cat]) grouped[cat] = [];
-            grouped[cat].push({ tag: t, count });
-        } else {
-            uncategorized.push({ tag: t, count });
-        }
-    }
+    let items = Object.entries(state.allTags)
+        .filter(([t]) => !cur.includes(t) && t !== 'del' && t !== FAV_TAG)
+        .sort((a, b) => b[1] - a[1]);
+    if (q) items = items.filter(([t]) => t.toLowerCase().includes(q));
+    else items = items.slice(0, TAG_CAND_LIMIT);
 
     let html = '';
+    // 输入了库里没有的标签 → 顶部内联创建行（不再弹一层选分类）
+    // 每敲一个字都会重渲染，先把下拉里已选的分类接住，别让它跳回默认
+    if (raw && !findTagExact(raw)) {
+        const prevCat = el.querySelector('#tagNewCat') ? el.querySelector('#tagNewCat').value : null;
+        html += newTagRowHtml(raw, prevCat);
+    }
 
-    for (const [cat, items] of Object.entries(grouped)) {
-        html += `<div class="tag-suggest-label">${esc(cat)}</div>`;
-        html += items.map(i => {
-            const onHomepage = state.homepageTags.has(i.tag);
-            return `<button class="tag-suggest-pill ${onHomepage ? 'tag-suggest-visible' : ''}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
-        }).join('');
+    if (items.length) {
+        if (!q) {
+            html += '<div class="tag-suggest-label">常用</div>' + items.map(tagPill).join('');
+        } else {
+            const grouped = {};
+            for (const [t, count] of items) {
+                const cat = tagToCat[t] || '其他';
+                (grouped[cat] || (grouped[cat] = [])).push([t, count]);
+            }
+            for (const [cat, list] of Object.entries(grouped)) {
+                html += `<div class="tag-suggest-label">${esc(cat)}</div>` + list.map(tagPill).join('');
+            }
+        }
+    } else if (!raw) {
+        html += '<div class="tag-suggest-empty">没有可添加的标签</div>';
     }
-    if (uncategorized.length) {
-        html += `<div class="tag-suggest-label">其他</div>`;
-        html += uncategorized.map(i => {
-            const onHomepage = state.homepageTags.has(i.tag);
-            return `<button class="tag-suggest-pill ${onHomepage ? 'tag-suggest-visible' : ''}" data-action="addTagDirect" data-arg1="${esc(i.tag)}">${esc(i.tag)}<span class="tag-suggest-count">${i.count}</span></button>`;
-        }).join('');
-    }
-    $('tagSuggestions').innerHTML = html;
+
+    el.innerHTML = html;
 }
 
+function tagPill([tag, count]) {
+    const on = state.homepageTags.has(tag);
+    return `<button class="tag-suggest-pill ${on ? 'tag-suggest-visible' : ''}" data-action="addTagDirect" data-arg1="${esc(tag)}" title="${on ? '主页已显示' : '主页未显示'}"><span class="tag-suggest-plus">+</span>${esc(tag)}<span class="tag-suggest-count">${count}</span></button>`;
+}
+
+function newTagRowHtml(tag, prevCat) {
+    // 优先沿用上次渲染时选中的分类，其次记住的上次分类，最后未分类
+    const cats = Object.keys(state.tagCategories || {});
+    const saved = localStorage.getItem(TAG_LAST_CAT_KEY) || '';
+    const cur = (prevCat !== null && prevCat !== undefined) ? prevCat
+              : (saved && cats.includes(saved) ? saved : '');
+    const opts = `<option value="" ${cur === '' ? 'selected' : ''}>未分类</option>`
+        + cats.map(c => `<option value="${esc(c)}" ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')
+        + `<option value="__new__">+ 新建分类…</option>`;
+    return `<div class="tag-new-row">
+        <span class="tag-new-text">创建新标签「<b>${esc(tag)}</b>」</span>
+        <select class="tag-new-select" id="tagNewCat">${opts}</select>
+        <button class="btn btn-primary btn-sm" data-action="createTagFromInput">创建</button>
+    </div>`;
+}
+
+/* 输入框回车 / 点候选：是已有标签就直接加，否则走创建。 */
 async function addTag() {
     const val = $('tagInput').value.trim();
     if (!val || !state.ctxTarget) return;
-    // 如果是新标签，先选分类
-    if (!state.allTags[val]) {
-        showCategoryPicker(val);
-        return;
-    }
-    await addTagDirect(val);
-    $('tagInput').value = '';
+    const existing = findTagExact(val);
+    if (existing) { await addTagDirect(existing); return; }
+    await createTagFromInput();
 }
 
-function showCategoryPicker(tag) {
-    const cats = Object.keys(state.tagCategories || {});
-    if (!cats.length) {
-        // 没有分类，直接创建
-        addNewTagWithCat(tag, '');
-        return;
+/* 就地创建新标签：用下拉选的分类（默认上次用过的分类）。 */
+async function createTagFromInput() {
+    const tag = ($('tagInput').value || '').trim();
+    if (!tag) return;
+    let cat = $('tagNewCat') ? $('tagNewCat').value : '';
+    if (cat === '__new__') {
+        const name = prompt('输入新分类名称：');
+        if (!name || !name.trim()) return;
+        cat = name.trim();
+        if (!state.tagCategories[cat]) state.tagCategories[cat] = [];
     }
-    const suggest = $('tagSuggestions');
-    let html = `<div class="tag-suggest-label">新标签「<b>${esc(tag)}</b>」选择分类：</div>`;
-    html += cats.map(c => `<button class="tag-suggest-pill" data-action="addNewTagWithCat" data-arg1="${esc(tag)}" data-arg2="${esc(c)}">${esc(c)}</button>`).join('');
-    html += `<button class="tag-suggest-pill tag-suggest-skip" data-action="addNewTagWithCat" data-arg1="${esc(tag)}" data-arg2="">跳过</button>`;
-    suggest.innerHTML = html;
+    await addNewTagWithCat(tag, cat);
 }
 
 async function addNewTagWithCat(tag, cat) {
     if (cat) {
         if (!state.tagCategories[cat]) state.tagCategories[cat] = [];
         if (!state.tagCategories[cat].includes(tag)) state.tagCategories[cat].push(tag);
+        localStorage.setItem(TAG_LAST_CAT_KEY, cat);
         saveTagConfig();
     }
     // 新标签默认不在主页显示（不加入 homepageTags）
     await addTagDirect(tag);
-    $('tagInput').value = '';
 }
 
 async function addTagDirect(tag) {
@@ -1856,10 +1985,11 @@ async function addTagDirect(tag) {
     const res = await apiPost('meta', { path: state.paths[pIdx], name, addTag: tag });
     if (res.ok) {
         comic.tags = res.tags;
-        // 新标签默认不在主页显示（不加入 homepageTags 白名单）
         await loadStats();
         renderTagList(res.tags);
-        renderTagSuggestions(res.tags);
+        const input = $('tagInput');
+        if (input) input.value = '';
+        renderTagCandidates('');
         saveTagConfig();
     }
 }
@@ -1874,7 +2004,7 @@ async function removeTag(tag) {
         comic.tags = res.tags;
         await loadStats();
         renderTagList(res.tags);
-        renderTagSuggestions(res.tags);
+        renderTagCandidates('');
     }
 }
 
@@ -2092,12 +2222,7 @@ function tagMgrInvert() {
 
 function filterByTagFromMgr(tag) {
     closeTagManager();
-    state.activeTags.clear();
-    state.activeTags.add(tag);
-    renderHomepageTags();
-    renderActiveTags();
-    updateTagPickerBtn();
-    applyFilters();
+    selectOnlyTag(tag);
 }
 
 function moveTagToCat(tag, cat) {
@@ -2145,6 +2270,52 @@ function deleteTagCategory(cat) {
     });
 }
 
+/* 标签名在 state 里有 5 处副本：allTags / homepageTags / tagCategories /
+   每本漫画的 tags 数组 / activeTags。改名必须五处同步，漏一处就会新旧名并存。 */
+function renameTagInState(oldTag, newTag) {
+    if (state.allTags[oldTag] !== undefined) {
+        state.allTags[newTag] = state.allTags[oldTag];
+        delete state.allTags[oldTag];
+    }
+    if (state.homepageTags.has(oldTag)) {
+        state.homepageTags.delete(oldTag);
+        state.homepageTags.add(newTag);
+    }
+    for (const cat of Object.keys(state.tagCategories)) {
+        const tags = state.tagCategories[cat];
+        const idx = tags.indexOf(oldTag);
+        if (idx >= 0) tags[idx] = newTag;
+    }
+    for (const list of state.comics) {
+        if (!list) continue;
+        for (const c of list) {
+            const idx = (c.tags || []).indexOf(oldTag);
+            if (idx >= 0) c.tags[idx] = newTag;
+        }
+    }
+    if (state.activeTags.has(oldTag)) {
+        state.activeTags.delete(oldTag);
+        state.activeTags.add(newTag);
+    }
+}
+
+/* 删除同理，五处副本一起清。 */
+function removeTagInState(tagName) {
+    delete state.allTags[tagName];
+    state.homepageTags.delete(tagName);
+    for (const cat of Object.keys(state.tagCategories)) {
+        state.tagCategories[cat] = state.tagCategories[cat].filter(t => t !== tagName);
+        if (!state.tagCategories[cat].length) delete state.tagCategories[cat];
+    }
+    for (const list of state.comics) {
+        if (!list) continue;
+        for (const c of list) {
+            if (c.tags) c.tags = c.tags.filter(t => t !== tagName);
+        }
+    }
+    state.activeTags.delete(tagName);
+}
+
 function renameTag(oldTag) {
     const newName = prompt(`重命名标签「${oldTag}」为：`, oldTag);
     if (!newName || !newName.trim() || newName.trim() === oldTag) return;
@@ -2153,31 +2324,7 @@ function renameTag(oldTag) {
         try {
             const res = await apiPost('rename-tag', { oldName: oldTag, newName: trimmed });
             if (res.ok) {
-                // 更新本地状态
-                if (state.allTags[oldTag] !== undefined) {
-                    state.allTags[trimmed] = state.allTags[oldTag];
-                    delete state.allTags[oldTag];
-                }
-                if (state.homepageTags.has(oldTag)) {
-                    state.homepageTags.delete(oldTag);
-                    state.homepageTags.add(trimmed);
-                }
-                for (const [cat, tags] of Object.entries(state.tagCategories)) {
-                    const idx = tags.indexOf(oldTag);
-                    if (idx >= 0) tags[idx] = trimmed;
-                }
-                // 更新漫画数据中的 tags
-                for (const list of state.comics) {
-                    if (!list) continue;
-                    for (const c of list) {
-                        const idx = (c.tags || []).indexOf(oldTag);
-                        if (idx >= 0) c.tags[idx] = trimmed;
-                    }
-                }
-                if (state.activeTags.has(oldTag)) {
-                    state.activeTags.delete(oldTag);
-                    state.activeTags.add(trimmed);
-                }
+                renameTagInState(oldTag, trimmed);
                 saveTagConfig();
                 renderTagBar();
                 renderTagManager();
@@ -2195,20 +2342,7 @@ function deleteTag(tagName) {
         try {
             const res = await apiPost('delete-tag', { name: tagName });
             if (res.ok) {
-                // 更新本地状态
-                delete state.allTags[tagName];
-                state.homepageTags.delete(tagName);
-                for (const [cat, tags] of Object.entries(state.tagCategories)) {
-                    state.tagCategories[cat] = tags.filter(t => t !== tagName);
-                    if (!state.tagCategories[cat].length) delete state.tagCategories[cat];
-                }
-                for (const list of state.comics) {
-                    if (!list) continue;
-                    for (const c of list) {
-                        if (c.tags) c.tags = c.tags.filter(t => t !== tagName);
-                    }
-                }
-                state.activeTags.delete(tagName);
+                removeTagInState(tagName);
                 saveTagConfig();
                 renderTagBar();
                 renderTagManager();
@@ -2427,7 +2561,6 @@ function handleEscAction() {
     if (!$('reader').classList.contains('hidden')) { closeReader(); return; }
     if (!$('contextMenu').classList.contains('hidden')) { $('contextMenu').classList.add('hidden'); return; }
     if (!$('recycleMenu').classList.contains('hidden')) { $('recycleMenu').classList.add('hidden'); return; }
-    if (!$('tagOverlay').classList.contains('hidden')) { closeTagModal(); return; }
     if (!$('tagMgrOverlay').classList.contains('hidden')) { closeTagManager(); return; }
     if (!$('tagPickerOverlay').classList.contains('hidden')) { closeTagPicker(); return; }
     if (!$('jmOverlay').classList.contains('hidden')) { closeJmPanel(); return; }
@@ -2742,6 +2875,7 @@ function switchJmMode(mode) {
     $('paneName').classList.toggle('hidden', mode !== 'name');
     $('paneId').classList.toggle('hidden', mode !== 'id');
     $(mode === 'name' ? 'nameInput' : 'jmInput').focus();
+    if (mode === 'name') checkNameAutoFill();   // 切回来时若还没填满，顺手续一批
 }
 
 /* ---------- 封面开关 ---------- */
@@ -2763,7 +2897,8 @@ async function doNameSearch() {
     const q = $('nameInput').value.trim();
     if (!q) return;
     state.jmNameSeq++;                       // 上一次的结果作废
-    state.jmNameCur = { q, next: 0, list: [] };
+    state.jmNameLoading = false;             // 上一次在途的那批不算数了
+    state.jmNameCur = { q, next: 0, list: [], hasMore: true };
     $('nameMore').innerHTML = '';
     $('nameBar').innerHTML = '';
     $('nameGrid').innerHTML = `<div class="jm-grid-loading"><div class="search-spinner"></div>`
@@ -2775,10 +2910,14 @@ async function doNameSearch() {
     if (btn) btn.disabled = false;
 }
 
+/* 滚到底自动加载：不再有「加载更多」按钮，滑到列表底部就续下一批。 */
 async function loadMoreNames() {
-    const my = state.jmNameSeq, q = state.jmNameCur.q, at = state.jmNameCur.next;
-    const btn = $('nameMore').querySelector('button');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="dl-spinner"></span>加载中…'; }
+    if (state.jmNameLoading) return;
+    const cur = state.jmNameCur;
+    if (!cur || !cur.q || cur.hasMore === false) return;
+    state.jmNameLoading = true;
+    const my = state.jmNameSeq, q = cur.q, at = cur.next;
+    $('nameMore').innerHTML = `<div class="jm-more-loading"><span class="dl-spinner"></span>加载中…</div>`;
     try {
         const r = await fetch(`/api/name-search?q=${encodeURIComponent(q)}&start=${at}&limit=${JM_LIMIT}`);
         const d = await r.json();
@@ -2787,10 +2926,26 @@ async function loadMoreNames() {
         renderNameResults(d);
     } catch (err) {
         if (my === state.jmNameSeq) failName('请求失败: ' + err.message);
+    } finally {
+        if (my === state.jmNameSeq) {
+            state.jmNameLoading = false;
+            checkNameAutoFill();       // 一屏没填满就继续续，用户不用手动滑
+        }
     }
 }
 
+/* 结果还没填满滚动区（且还有更多）就再拉一批，避免「内容不够高、滚不动也无法触发」。 */
+function checkNameAutoFill() {
+    const pane = $('paneName');
+    if (!pane || pane.classList.contains('hidden')) return;
+    if (!state.jmNameCur || state.jmNameCur.hasMore === false) return;
+    const el = pane.querySelector('.jm-pane-scroll');
+    if (el && el.scrollHeight <= el.clientHeight + 60) loadMoreNames();
+}
+
 function failName(msg) {
+    // 出错就停下自动续批，免得 checkNameAutoFill 一直重试；重新搜索即可
+    if (state.jmNameCur) state.jmNameCur.hasMore = false;
     $('nameBar').innerHTML = '';
     $('nameMore').innerHTML = '';
     $('nameGrid').innerHTML = `<div class="jm-error" style="grid-column:1/-1">${esc(msg)}</div>`;
@@ -2798,6 +2953,7 @@ function failName(msg) {
 
 function renderNameResults(d) {
     state.jmNameCur.next = d.next_start;
+    state.jmNameCur.hasMore = !!d.has_more;
     const tag = d.cached
         ? `<span class="jm-badge">缓存 ${d.elapsed}s</span>`
         : `<span class="jm-badge">网络 ${d.elapsed}s</span>`;
@@ -2815,8 +2971,9 @@ function renderNameResults(d) {
     d.items.forEach(it => { state.jmNameItems[it.id] = it; state.jmNameCur.list.push(it); });
     $('nameGrid').insertAdjacentHTML('beforeend', d.items.map(nameTile).join(''));
 
+    // 还有更多就留空，滑到底自动续；到底了才给一句结束语
     $('nameMore').innerHTML = d.has_more
-        ? `<button class="btn btn-outline btn-block" data-action="loadMoreNames">加载更多（${JM_LIMIT} 条）</button>`
+        ? ''
         : '<div class="jm-empty" style="padding:24px 0">已经到底了</div>';
 }
 
@@ -2843,11 +3000,11 @@ function openJmDetail(id) {
     const it = state.jmNameItems[id];
     if (!it) return;
     state.jmDetailId = id;
+    state.detailMode = 'jm';
     const my = ++state.jmDetailSeq;
-    const ov = $('detailOverlay');
-    ov.classList.remove('hidden');
-    requestAnimationFrame(() => { ov.classList.add('visible'); $('detailPanel').classList.add('animate-in'); });
+    syncDetailHeader();
     renderJmDetail(it, true);
+    showDetailPanel();
 
     fetch(`/api/detail?id=${encodeURIComponent(id)}`)
         .then(r => r.json().then(d => ({ ok: r.ok, d })))
@@ -2866,6 +3023,7 @@ function openJmDetail(id) {
 }
 
 function closeJmDetail() {
+    hideAuthorMenu();
     state.jmDetailSeq++;                          // 让在途的详情请求作废
     state.jmDetailId = null;
     $('detailPanel').classList.remove('animate-in');
@@ -2929,6 +3087,13 @@ if ($('nameGrid')) {
     $('jmResult').innerHTML = ID_EMPTY;
     $('coverToggle').checked = showNameCover;
     $('nameGrid').classList.toggle('no-cover', !showNameCover);
+    // 名称搜索：结果区滚到接近底部就自动续下一批
+    const nameScroll = $('paneName').querySelector('.jm-pane-scroll');
+    if (nameScroll) {
+        nameScroll.addEventListener('scroll', () => {
+            if (nameScroll.scrollTop + nameScroll.clientHeight >= nameScroll.scrollHeight - 300) loadMoreNames();
+        }, { passive: true });
+    }
 }
 
 async function doJmSearch() {
